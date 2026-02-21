@@ -9,6 +9,8 @@ import com.nexflow.nexflow_backend.repository.ExecutionRepository;
 import com.nexflow.nexflow_backend.repository.FlowRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -25,18 +27,17 @@ public class FlowService {
     private final ExecutionRepository executionRepository;
     private final ObjectMapper objectMapper;
 
-    public Execution triggerFlow(UUID flowId, Map<String, Object> payload) {
+    public Execution triggerFlow(UUID flowId, Map<String, Object> payload, String triggeredBy) {
         flowRepository.findById(flowId)
                 .orElseThrow(() -> new IllegalArgumentException("Flow not found: " + flowId));
 
         Execution execution = new Execution();
         execution.setFlowId(flowId);
-        execution.setTriggeredBy("PULSE");
+        execution.setTriggeredBy(triggeredBy);
         executionRepository.save(execution);
 
         try {
             NexflowContextObject nco = engine.execute(flowId, execution.getId().toString(), payload);
-
             execution.setStatus(nco.getMeta().getStatus());
             execution.setNcoSnapshot(objectMapper.convertValue(nco, Map.class));
             execution.setCompletedAt(Instant.now());
@@ -48,5 +49,29 @@ public class FlowService {
         }
 
         return executionRepository.save(execution);
+    }
+
+    /**
+     * Convenience overload — keeps PulseController call-site clean.
+     */
+    public Execution triggerFlow(UUID flowId, Map<String, Object> payload) {
+        return triggerFlow(flowId, payload, "PULSE");
+    }
+
+    /**
+     * ASYNCHRONOUS execution — returns immediately after persisting the Execution row.
+     * The actual engine run happens on a background thread (@Async).
+     * Used by SubFlowExecutor when mode = ASYNC.
+     *
+     * Note: @Async requires a TaskExecutor bean. Spring Boot auto-configures one when
+     * @EnableAsync is present on any @Configuration class (add to AppConfig.java).
+     */
+    @Async
+    public void triggerFlowAsync(UUID flowId, Map<String, Object> payload, String triggeredBy) {
+        try {
+            triggerFlow(flowId, payload, triggeredBy);
+        } catch (Exception ex) {
+            log.error("Async flow {} failed: {}", flowId, ex.getMessage());
+        }
     }
 }

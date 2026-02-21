@@ -103,6 +103,8 @@ public class FlowController {
             e.setFlowId(flowId);
             e.setSourceNodeId(UUID.fromString(dto.sourceNodeId().trim()));
             e.setTargetNodeId(UUID.fromString(dto.targetNodeId().trim()));
+            e.setSourceHandle(dto.sourceHandle() != null && !dto.sourceHandle().isBlank() ? dto.sourceHandle().trim() : null);
+            e.setTargetHandle(dto.targetHandle() != null && !dto.targetHandle().isBlank() ? dto.targetHandle().trim() : null);
             e.setConditionType(parseEdgeCondition(dto.conditionType()));
             e.setConditionExpr(dto.conditionExpr());
             return e;

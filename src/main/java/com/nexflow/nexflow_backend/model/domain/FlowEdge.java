@@ -24,6 +24,14 @@ public class FlowEdge {
     @Column(name = "target_node_id", nullable = false)
     private UUID targetNodeId;
 
+    /** React Flow source handle id, e.g. "success" or "failure" for dual-output nodes. */
+    @Column(name = "source_handle")
+    private String sourceHandle;
+
+    /** React Flow target handle id when target has multiple inputs. */
+    @Column(name = "target_handle")
+    private String targetHandle;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "condition_type", nullable = false)
     private EdgeCondition conditionType = EdgeCondition.DEFAULT;

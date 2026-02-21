@@ -8,4 +8,9 @@ import java.util.UUID;
 
 public interface ExecutionRepository extends JpaRepository<Execution, UUID> {
     List<Execution> findByFlowIdOrderByStartedAtDesc(UUID flowId);
+     // All executions newest-first — used by the Transactions page
+     List<Execution> findAllByOrderByStartedAtDesc();
+
+     // Count executions per flow — used for pulse stats
+     long countByFlowId(UUID flowId);
 }

@@ -9,6 +9,8 @@ public record FlowEdgeDto(
     String flowId,
     String sourceNodeId,
     String targetNodeId,
+    String sourceHandle,
+    String targetHandle,
     String conditionType,
     String conditionExpr
 ) {}

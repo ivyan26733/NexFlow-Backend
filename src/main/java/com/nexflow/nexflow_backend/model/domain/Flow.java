@@ -19,6 +19,10 @@ public class Flow {
     @Column(nullable = false)
     private String name;
 
+    /** Public trigger key (e.g. authService). Used for POST /api/pulse/{slug}. */
+    @Column(unique = true)
+    private String slug = "";
+
     private String description;
 
     @Column(name = "user_id")
