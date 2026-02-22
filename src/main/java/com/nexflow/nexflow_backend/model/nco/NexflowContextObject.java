@@ -6,7 +6,10 @@ import lombok.Builder;
 import lombok.Data;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @Data
@@ -19,9 +22,13 @@ public class NexflowContextObject {
     @Builder.Default
     private Map<String, Object> variables = new HashMap<>();
 
-    // Keyed by nodeId, stores each node's execution result
+    // Keyed by nodeId, stores each node's execution result — LinkedHashMap preserves execution order
     @Builder.Default
-    private Map<String, NodeContext> nodes = new HashMap<>();
+    private Map<String, NodeContext> nodes = new LinkedHashMap<>();
+
+    // Explicit execution order — jsonb reorders object keys, so we keep a list (arrays stay ordered)
+    @Builder.Default
+    private List<String> nodeExecutionOrder = new ArrayList<>();
 
 //    Factory Method
     public static NexflowContextObject create(String flowId, String executionId) {

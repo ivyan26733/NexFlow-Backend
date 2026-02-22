@@ -43,7 +43,8 @@ public class FlowService {
             execution.setCompletedAt(Instant.now());
 
         } catch (Exception ex) {
-            log.error("Flow {} execution failed: {}", flowId, ex.getMessage());
+            String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+            log.error("Flow {} execution failed: {}", flowId, msg, ex);
             execution.setStatus(ExecutionStatus.FAILURE);
             execution.setCompletedAt(Instant.now());
         }
@@ -51,6 +52,8 @@ public class FlowService {
         return executionRepository.save(execution);
     }
 
+    
+    
     /**
      * Convenience overload — keeps PulseController call-site clean.
      */
@@ -66,12 +69,15 @@ public class FlowService {
      * Note: @Async requires a TaskExecutor bean. Spring Boot auto-configures one when
      * @EnableAsync is present on any @Configuration class (add to AppConfig.java).
      */
+
+
     @Async
     public void triggerFlowAsync(UUID flowId, Map<String, Object> payload, String triggeredBy) {
         try {
             triggerFlow(flowId, payload, triggeredBy);
         } catch (Exception ex) {
-            log.error("Async flow {} failed: {}", flowId, ex.getMessage());
+            String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+            log.error("Async flow {} failed: {}", flowId, msg, ex);
         }
     }
 }

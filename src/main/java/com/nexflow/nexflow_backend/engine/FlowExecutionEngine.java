@@ -1,5 +1,4 @@
 package com.nexflow.nexflow_backend.engine;
-
 import com.nexflow.nexflow_backend.EdgeCondition;
 import com.nexflow.nexflow_backend.executor.NodeExecutorRegistry;
 import com.nexflow.nexflow_backend.model.domain.FlowEdge;
@@ -11,22 +10,35 @@ import com.nexflow.nexflow_backend.model.nco.NodeContext;
 import com.nexflow.nexflow_backend.model.nco.NodeStatus;
 import com.nexflow.nexflow_backend.repository.FlowEdgeRepository;
 import com.nexflow.nexflow_backend.repository.FlowNodeRepository;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-
 import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Queue;
+import java.util.UUID;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class FlowExecutionEngine {
 
     private final FlowNodeRepository nodeRepository;
     private final FlowEdgeRepository edgeRepository;
     private final NodeExecutorRegistry executorRegistry;
     private final ExecutionEventPublisher eventPublisher;
+
+    public FlowExecutionEngine(FlowNodeRepository nodeRepository, FlowEdgeRepository edgeRepository,
+                               NodeExecutorRegistry executorRegistry, ExecutionEventPublisher eventPublisher) {
+        this.nodeRepository = nodeRepository;
+        this.edgeRepository = edgeRepository;
+        this.executorRegistry = executorRegistry;
+        this.eventPublisher = eventPublisher;
+    }
 
     public NexflowContextObject execute(UUID flowId, String executionId, Map<String, Object> triggerPayload) {
         NexflowContextObject nco = NexflowContextObject.create(flowId.toString(), executionId);
@@ -46,29 +58,46 @@ public class FlowExecutionEngine {
 
             eventPublisher.nodeStarted(executionId, current.getId().toString());
             NodeContext result = runNode(current, nco);
-            nco.setNodeOutput(current.getId().toString(), result);
+            // Do not overwrite START node output (set in injectTriggerPayload with output.body)
+            if (!current.getId().equals(startNode.getId())) {
+                nco.setNodeOutput(current.getId().toString(), result);
+            }
             eventPublisher.nodeCompleted(executionId, current.getId().toString(), result.getStatus());
+            nco.getNodeExecutionOrder().add(current.getId().toString());
 
             if (isTerminal(current.getNodeType())) break;
 
-            List<FlowNode> nextNodes = resolveNextNodes(current, result.getStatus(), allEdges, allNodes);
+            // Copy to mutable list (resolveNextNodes returns immutable toList()); sort so non-terminals run before SUCCESS/FAILURE
+            List<FlowNode> nextNodes = new ArrayList<>(resolveNextNodes(current, result.getStatus(), allEdges, allNodes));
+            nextNodes.sort(Comparator.comparing((FlowNode n) -> isTerminal(n.getNodeType()) ? 1 : 0));
             queue.addAll(nextNodes);
         }
 
         finalizeExecution(nco);
         return nco;
     }
-
-    private NodeContext runNode(FlowNode node, NexflowContextObject nco) {
-        try {
-            return executorRegistry.get(node.getNodeType()).execute(node, nco);
-        } catch (Exception ex) {
-            log.error("Node {} execution failed: {}", node.getId(), ex.getMessage());
+    
+    private NodeContext runNode(FlowNode flowNode, NexflowContextObject nco) {
+        NodeType nodeType = flowNode.getNodeType();
+        if (nodeType == null) {
+            log.error("Node {} has null nodeType", flowNode.getId());
             return NodeContext.builder()
-                    .nodeId(node.getId().toString())
-                    .nodeType(node.getNodeType().name())
+                    .nodeId(flowNode.getId().toString())
+                    .nodeType("UNKNOWN")
                     .status(NodeStatus.FAILURE)
-                    .errorMessage(ex.getMessage())
+                    .errorMessage("Node type is null")
+                    .build();
+        }
+        try {
+            return executorRegistry.get(nodeType).execute(flowNode, nco);
+        } catch (Exception ex) {
+            String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+            log.error("Node {} ({}): {}", flowNode.getId(), nodeType, msg, ex);
+            return NodeContext.builder()
+                    .nodeId(flowNode.getId().toString())
+                    .nodeType(nodeType.name())
+                    .status(NodeStatus.FAILURE)
+                    .errorMessage(msg)
                     .build();
         }
     }
@@ -92,11 +121,21 @@ public class FlowExecutionEngine {
     }
 
     private void injectTriggerPayload(FlowNode startNode, NexflowContextObject nco, Map<String, Object> payload) {
+        // Defensive copy so we own the map and it is never null
+        Map<String, Object> body = payload != null && !payload.isEmpty()
+                ? new HashMap<>(payload)
+                : new HashMap<>();
+
+        // Store under output.body so {{nodes.start.output.body.a}} resolves correctly.
+        // This is the only place START node output is set; the main loop must not overwrite it.
+        Map<String, Object> output = new HashMap<>();
+        output.put("body", body);
+
         NodeContext startCtx = NodeContext.builder()
                 .nodeId(startNode.getId().toString())
                 .nodeType(NodeType.START.name())
                 .status(NodeStatus.SUCCESS)
-                .output(payload)
+                .output(output)
                 .build();
         nco.setNodeOutput(startNode.getId().toString(), startCtx);
     }

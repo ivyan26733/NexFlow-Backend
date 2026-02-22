@@ -34,14 +34,42 @@ public class FlowController {
 
     @PostMapping
     public Flow createFlow(@RequestBody Flow flow) {
+        if (flow.getSlug() == null || flow.getSlug().isBlank()) {
+            flow.setSlug(uniqueSlug());
+        } else {
+            flow.setSlug(flow.getSlug().trim());
+        }
         return flowRepository.save(flow);
+    }
+
+    private String uniqueSlug() {
+        String slug;
+        do {
+            slug = "flow-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        } while (flowRepository.findBySlug(slug).isPresent());
+        return slug;
     }
 
     @GetMapping("/{flowId}")
     public ResponseEntity<Flow> getFlow(@PathVariable UUID flowId) {
         return flowRepository.findById(flowId)
+                .map(this::ensureSlug)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
+    }
+
+    /** Backfill slug if missing so trigger-by-slug works for flows created before slug was required. */
+    private Flow ensureSlug(Flow flow) {
+        if (flow.getSlug() == null || flow.getSlug().isBlank()) {
+            String slug = "flow-" + flow.getId().toString().replace("-", "").substring(0, 12);
+            if (flowRepository.findBySlug(slug).isEmpty()) {
+                flow.setSlug(slug);
+            } else {
+                flow.setSlug("flow-" + flow.getId().toString().replace("-", ""));
+            }
+            flowRepository.save(flow);
+        }
+        return flow;
     }
 
     // Save the entire canvas in one shot — Studio sends all nodes + edges together
