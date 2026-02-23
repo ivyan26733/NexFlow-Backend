@@ -20,4 +20,7 @@ COPY --from=build /app/target/*.jar app.jar
 # Expose the port the app listens on (Railway overrides with PORT at runtime)
 EXPOSE 8080
 
+# Activate the production profile on Railway
+ENV SPRING_PROFILES_ACTIVE=production
+
 ENTRYPOINT ["java", "-jar", "app.jar"]
