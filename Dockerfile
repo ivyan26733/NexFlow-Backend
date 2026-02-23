@@ -10,17 +10,29 @@ RUN mvn dependency:go-offline -B
 COPY src ./src
 RUN mvn package -DskipTests -B
 
-# Stage 2: Runtime image — JRE only, no Maven or JDK
-FROM eclipse-temurin:17-jre
+# ── Stage 2: Runtime ─────────────────────────────────────────
+# Use Ubuntu-based JRE so we can easily install Node.js + Python
+FROM eclipse-temurin:17-jre-jammy
+
 WORKDIR /app
 
-# Copy the built JAR from the build stage and rename for a fixed entrypoint
+# Install Node.js 20 and Python3
+# apt-get update fetches the package list
+# nodejs and python3 are needed by ScriptRunner.java to execute
+# JavaScript and Python scripts at runtime
+# curl is needed to add the NodeSource repository for Node 20
+RUN apt-get update && \
+    apt-get install -y curl python3 && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Verify both runtimes are available (printed in Railway build logs)
+RUN node --version && python3 --version
+
 COPY --from=build /app/target/*.jar app.jar
 
-# Expose the port the app listens on (Railway overrides with PORT at runtime)
 EXPOSE 8080
-
-# Activate the production profile on Railway
-ENV SPRING_PROFILES_ACTIVE=production
 
 ENTRYPOINT ["java", "-jar", "app.jar"]
