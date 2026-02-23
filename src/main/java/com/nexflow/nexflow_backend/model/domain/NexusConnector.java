@@ -30,6 +30,12 @@ public class NexusConnector {
 
     private String description;
 
+    // REST or JDBC — nullable so ALTER TABLE succeeds when table has existing rows; null treated as "REST" in code
+    @Column(name = "connector_type")
+    private String connectorType = "REST";
+
+    // ── REST fields ────────────────────────────────────────────────────────────
+
     @Column(name = "base_url")
     private String baseUrl;
 
@@ -47,6 +53,22 @@ public class NexusConnector {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "auth_config")
     private Map<String, String> authConfig;
+
+    // ── JDBC fields ────────────────────────────────────────────────────────────
+
+    @Column(name = "jdbc_url")
+    private String jdbcUrl;
+
+    @Column(name = "jdbc_driver")
+    private String jdbcDriver;
+
+    @Column(name = "db_username")
+    private String dbUsername;
+
+    @Column(name = "db_password")
+    private String dbPassword;
+
+    // ── Audit ──────────────────────────────────────────────────────────────────
 
     @Column(name = "created_at")
     private Instant createdAt = Instant.now();

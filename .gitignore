@@ -1,5 +1,27 @@
-HELP.md
+# Maven build output
 target/
+*.jar
+*.war
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+*.class
+
+# Environment files — never commit secrets
+.env
+.env.local
+.env.production
+
+# Local dev overrides (may contain DB password)
+src/main/resources/application-local.properties
+
+# Log files
+*.log
+logs/
+
+HELP.md
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
@@ -14,7 +36,7 @@ target/
 .sts4-cache
 
 ### IntelliJ IDEA ###
-.idea
+.idea/
 *.iws
 *.iml
 *.ipr

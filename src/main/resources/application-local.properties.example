@@ -1,0 +1,9 @@
+# Local development overrides (not loaded by default)
+# 1. Copy this file to application-local.properties (that file is gitignored)
+# 2. Set your local PostgreSQL password below
+# 3. Run the app with: --spring.profiles.active=local
+#
+# Or set env vars instead: DB_USERNAME=postgres DB_PASSWORD=yourpassword
+
+spring.datasource.username=postgres
+spring.datasource.password=YOUR_LOCAL_POSTGRES_PASSWORD

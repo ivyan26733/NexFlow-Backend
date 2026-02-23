@@ -9,4 +9,6 @@ import java.util.UUID;
 public interface FlowRepository extends JpaRepository<Flow, UUID> {
 
     Optional<Flow> findBySlug(String slug);
+
+    boolean existsBySlug(String slug);
 }

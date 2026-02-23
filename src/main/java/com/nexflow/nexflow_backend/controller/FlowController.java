@@ -35,19 +35,25 @@ public class FlowController {
     @PostMapping
     public Flow createFlow(@RequestBody Flow flow) {
         if (flow.getSlug() == null || flow.getSlug().isBlank()) {
-            flow.setSlug(uniqueSlug());
-        } else {
-            flow.setSlug(flow.getSlug().trim());
+            flow.setSlug(toSlug(flow.getName()));
+        }
+        String base = flow.getSlug();
+        int counter = 1;
+        while (flowRepository.existsBySlug(flow.getSlug())) {
+            flow.setSlug(base + "-" + counter++);
         }
         return flowRepository.save(flow);
     }
 
-    private String uniqueSlug() {
-        String slug;
-        do {
-            slug = "flow-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        } while (flowRepository.findBySlug(slug).isPresent());
-        return slug;
+    /** "Auth Service" → "auth-service" */
+    private static String toSlug(String name) {
+        if (name == null || name.isBlank()) {
+            return "flow-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        }
+        return name.toLowerCase()
+                .replaceAll("[^a-z0-9\\s-]", "")
+                .trim()
+                .replaceAll("\\s+", "-");
     }
 
     @GetMapping("/{flowId}")

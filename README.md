@@ -102,6 +102,36 @@ nexflow-backend/
 - **IDs:** `FlowNode` and `FlowEdge` use `@Id` **without** `@GeneratedValue`. The frontend sends UUIDs for nodes and edges; the backend persists them as-is. Do not add `@GeneratedValue` or canvas edges will no longer match nodes after reload.
 - **Canvas save:** Uses DTOs (`CanvasSaveDto`, `FlowNodeDto`, `FlowEdgeDto`) and `@Transactional`. Invalid edges (e.g. null source/target) are skipped; valid ones are saved.
 
+## CI/CD
+
+Pipeline: GitHub Actions → Railway
+
+| Branch event | What happens |
+|---|---|
+| Push to `main` | CI runs (compile + test) → if passes → deploys to Railway |
+| Pull request to `main` | CI runs as a check → no deployment |
+| Push to any other branch | Nothing (pipeline does not trigger) |
+
+**GitHub Secrets required** (Settings → Secrets and variables → Actions):
+
+| Secret | How to get it |
+|---|---|
+| `RAILWAY_DEPLOY_HOOK_URL` | Railway → Project → Settings → Deploy Hook → Generate |
+| `RAILWAY_APP_URL` | Railway → Project → Settings → Domains (just the domain, no https://) |
+
+**Railway Environment Variables** (set in Railway dashboard):
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | Auto-injected by Railway when you add a PostgreSQL service |
+| `PORT` | Auto-injected by Railway |
+| `CORS_ALLOWED_ORIGINS` | Your Vercel frontend URL e.g. `https://nexflow.vercel.app` |
+
+**Running locally:**
+
+No changes needed. All environment variables in application.yml have
+localhost fallback values, so local development works exactly as before.
+
 ## License
 
 Private / as per project.

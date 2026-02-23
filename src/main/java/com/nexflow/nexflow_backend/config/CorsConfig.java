@@ -13,9 +13,12 @@ public class CorsConfig {
     public CorsFilter corsFilter() {
         CorsConfiguration config = new CorsConfiguration();
 
-        // Allow your frontend origin
+        // Local dev
         config.addAllowedOriginPattern("http://localhost:*");
         config.addAllowedOriginPattern("http://127.0.0.1:*");
+        // Netlify (production)
+        config.addAllowedOriginPattern("https://*.netlify.app");
+        config.addAllowedOriginPattern("https://*.netlify.com");
 
         config.addAllowedMethod("*");   // GET, POST, PUT, DELETE, OPTIONS
         config.addAllowedHeader("*");   // all headers

@@ -61,6 +61,7 @@ public class FlowExecutionEngine {
             // Do not overwrite START node output (set in injectTriggerPayload with output.body)
             if (!current.getId().equals(startNode.getId())) {
                 nco.setNodeOutput(current.getId().toString(), result);
+                nco.setNodeAlias(toLabelKey(current.getLabel()), result);
             }
             eventPublisher.nodeCompleted(executionId, current.getId().toString(), result.getStatus());
             nco.getNodeExecutionOrder().add(current.getId().toString());
@@ -138,6 +139,24 @@ public class FlowExecutionEngine {
                 .output(output)
                 .build();
         nco.setNodeOutput(startNode.getId().toString(), startCtx);
+        nco.setNodeAlias("start", startCtx);
+    }
+
+    /**
+     * Converts a node label to a camelCase key for {{}} refs (e.g. "Calculate Discount" → "calculateDiscount").
+     */
+    public static String toLabelKey(String label) {
+        if (label == null || label.isBlank()) return "node";
+        String[] words = label.trim().replaceAll("[^a-zA-Z0-9 ]", "").split("\\s+");
+        if (words.length == 0 || words[0].isBlank()) return "node";
+        StringBuilder key = new StringBuilder(words[0].toLowerCase());
+        for (int i = 1; i < words.length; i++) {
+            if (!words[i].isBlank()) {
+                key.append(Character.toUpperCase(words[i].charAt(0)));
+                key.append(words[i].substring(1).toLowerCase());
+            }
+        }
+        return key.toString();
     }
 
     private FlowNode findStartNode(List<FlowNode> nodes) {

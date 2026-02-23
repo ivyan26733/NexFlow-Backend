@@ -1,0 +1,22 @@
+# Git files — not needed in Docker image
+.git
+.gitignore
+
+# Maven build output — Stage 1 builds fresh anyway
+target/
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+
+# GitHub Actions — not needed in the image
+.github/
+
+# Local environment files
+.env
+.env.local
+
+# README and docs
+README.md
+*.md

@@ -40,10 +40,15 @@ public class NexusController {
                 .map(existing -> {
                     existing.setName(updated.getName());
                     existing.setDescription(updated.getDescription());
+                    existing.setConnectorType(updated.getConnectorType());
                     existing.setBaseUrl(updated.getBaseUrl());
                     existing.setAuthType(updated.getAuthType());
                     existing.setDefaultHeaders(updated.getDefaultHeaders());
                     existing.setAuthConfig(updated.getAuthConfig());
+                    existing.setJdbcUrl(updated.getJdbcUrl());
+                    existing.setJdbcDriver(updated.getJdbcDriver());
+                    existing.setDbUsername(updated.getDbUsername());
+                    existing.setDbPassword(updated.getDbPassword());
                     return ResponseEntity.ok(connectorRepository.save(existing));
                 })
                 .orElse(ResponseEntity.notFound().build());
