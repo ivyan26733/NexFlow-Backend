@@ -74,12 +74,19 @@ jobs:
 
       # Trigger Railway to pull and deploy the latest commit.
       - name: Trigger Railway deployment
-        run: curl -X POST "${{ secrets.RAILWAY_DEPLOY_HOOK_URL }}"
+        run: |
+          if [ -z "${{ secrets.RAILWAY_DEPLOY_HOOK_URL }}" ]; then
+            echo "::error::RAILWAY_DEPLOY_HOOK_URL secret is not set. Add it in Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          curl -sf -X POST "${{ secrets.RAILWAY_DEPLOY_HOOK_URL }}"
 
       # Wait for Railway to finish deploying, then hit the API to confirm the app is up.
       - name: Wait and verify deployment
         run: |
+          if [ -z "${{ secrets.RAILWAY_APP_URL }}" ]; then
+            echo "::error::RAILWAY_APP_URL secret is not set. Add it in Settings → Secrets and variables → Actions."
+            exit 1
+          fi
           sleep 45
           curl --fail --retry 3 --retry-delay 10 "https://${{ secrets.RAILWAY_APP_URL }}/api/flows"
-        env:
-          RAILWAY_APP_URL: ${{ secrets.RAILWAY_APP_URL }}
