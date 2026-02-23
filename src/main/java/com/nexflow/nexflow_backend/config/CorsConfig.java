@@ -1,31 +1,35 @@
 package com.nexflow.nexflow_backend.config;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import org.springframework.web.filter.CorsFilter;
 
+import java.util.Arrays;
+import java.util.List;
+
 @Configuration
 public class CorsConfig {
+
+    @Value("${app.cors.allowed-origins:http://localhost:3000}")
+    private String allowedOrigins;
 
     @Bean
     public CorsFilter corsFilter() {
         CorsConfiguration config = new CorsConfiguration();
 
-        // Local dev
-        config.addAllowedOriginPattern("http://localhost:*");
-        config.addAllowedOriginPattern("http://127.0.0.1:*");
-        // Netlify (production)
-        config.addAllowedOriginPattern("https://*.netlify.app");
-        config.addAllowedOriginPattern("https://*.netlify.com");
+        // Split comma-separated origins from the property
+        List<String> origins = Arrays.asList(allowedOrigins.split("\\s*,\\s*"));
+        origins.forEach(config::addAllowedOriginPattern);
 
-        config.addAllowedMethod("*");   // GET, POST, PUT, DELETE, OPTIONS
-        config.addAllowedHeader("*");   // all headers
+        config.addAllowedMethod("*");
+        config.addAllowedHeader("*");
         config.setAllowCredentials(true);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-        source.registerCorsConfiguration("/**", config); // apply to all endpoints
+        source.registerCorsConfiguration("/**", config);
 
         return new CorsFilter(source);
     }
