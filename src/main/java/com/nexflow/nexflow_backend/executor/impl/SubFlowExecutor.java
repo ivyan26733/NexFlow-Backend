@@ -137,7 +137,7 @@ public class SubFlowExecutor implements NodeExecutor {
 
         // ── SYNC — block until child completes ───────────────────────────────
         try {
-            Execution childExecution = flowService.triggerFlow(targetUuid, resolvedPayload, triggeredBy);
+            Execution childExecution = flowService.triggerFlowSync(targetUuid, resolvedPayload, triggeredBy);
             boolean   childSucceeded = "SUCCESS".equals(childExecution.getStatus().name());
 
             Map<String, Object> output = new LinkedHashMap<>();

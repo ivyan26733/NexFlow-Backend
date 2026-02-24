@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 @Slf4j
 @Service
@@ -27,6 +28,11 @@ public class FlowService {
     private final ExecutionRepository executionRepository;
     private final ObjectMapper objectMapper;
 
+    /**
+     * Triggers a flow and returns immediately with the execution (status RUNNING).
+     * The actual execution runs in the background so the frontend can subscribe to
+     * WebSocket events before they are sent. Used by Pulse API (Studio Trigger).
+     */
     public Execution triggerFlow(UUID flowId, Map<String, Object> payload, String triggeredBy) {
         flowRepository.findById(flowId)
                 .orElseThrow(() -> new IllegalArgumentException("Flow not found: " + flowId));
@@ -34,22 +40,45 @@ public class FlowService {
         Execution execution = new Execution();
         execution.setFlowId(flowId);
         execution.setTriggeredBy(triggeredBy);
-        executionRepository.save(execution);
+        execution = executionRepository.save(execution);
+        final UUID executionId = execution.getId();
+        CompletableFuture.runAsync(() -> runExecutionInBackground(executionId, flowId, payload));
+        return execution;
+    }
 
+    /**
+     * Triggers a flow and blocks until complete. Returns the final execution.
+     * Used by SubFlowExecutor in SYNC mode.
+     */
+    public Execution triggerFlowSync(UUID flowId, Map<String, Object> payload, String triggeredBy) {
+        flowRepository.findById(flowId)
+                .orElseThrow(() -> new IllegalArgumentException("Flow not found: " + flowId));
+
+        Execution execution = new Execution();
+        execution.setFlowId(flowId);
+        execution.setTriggeredBy(triggeredBy);
+        execution = executionRepository.save(execution);
+
+        final UUID executionId = execution.getId();
+        runExecutionInBackground(executionId, flowId, payload);
+        return executionRepository.findById(executionId)
+                .orElseThrow(() -> new IllegalStateException("Execution not found after run: " + executionId));
+    }
+
+    private void runExecutionInBackground(UUID executionId, UUID flowId, Map<String, Object> payload) {
+        Execution execution = executionRepository.findById(executionId)
+                .orElseThrow(() -> new IllegalStateException("Execution not found: " + executionId));
         try {
-            NexflowContextObject nco = engine.execute(flowId, execution.getId().toString(), payload);
+            NexflowContextObject nco = engine.execute(flowId, executionId.toString(), payload);
             execution.setStatus(nco.getMeta().getStatus());
             execution.setNcoSnapshot(objectMapper.convertValue(nco, Map.class));
-            execution.setCompletedAt(Instant.now());
-
         } catch (Exception ex) {
             String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
             log.error("Flow {} execution failed: {}", flowId, msg, ex);
             execution.setStatus(ExecutionStatus.FAILURE);
-            execution.setCompletedAt(Instant.now());
         }
-
-        return executionRepository.save(execution);
+        execution.setCompletedAt(Instant.now());
+        executionRepository.save(execution);
     }
 
     
@@ -74,7 +103,7 @@ public class FlowService {
     @Async
     public void triggerFlowAsync(UUID flowId, Map<String, Object> payload, String triggeredBy) {
         try {
-            triggerFlow(flowId, payload, triggeredBy);
+            triggerFlowSync(flowId, payload, triggeredBy);
         } catch (Exception ex) {
             String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
             log.error("Async flow {} failed: {}", flowId, msg, ex);
