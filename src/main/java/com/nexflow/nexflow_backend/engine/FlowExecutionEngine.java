@@ -51,6 +51,7 @@ public class FlowExecutionEngine {
 
         Queue<FlowNode> queue = new LinkedList<>();
         queue.add(startNode);
+        boolean CheckOutputFlag = true;
 
         while (!queue.isEmpty()) {
             FlowNode current = queue.poll();
@@ -66,7 +67,10 @@ public class FlowExecutionEngine {
             eventPublisher.nodeCompleted(executionId, current.getId().toString(), result.getStatus());
             nco.getNodeExecutionOrder().add(current.getId().toString());
 
-            if (isTerminal(current.getNodeType())) break;
+
+            if(result.getStatus() == NodeStatus.FAILURE) CheckOutputFlag = false;
+
+            if(isTerminal(current.getNodeType())) break;
 
             // Copy to mutable list (resolveNextNodes returns immutable toList()); sort so non-terminals run before SUCCESS/FAILURE
             List<FlowNode> nextNodes = new ArrayList<>(resolveNextNodes(current, result.getStatus(), allEdges, allNodes));
@@ -74,7 +78,7 @@ public class FlowExecutionEngine {
             queue.addAll(nextNodes);
         }
 
-        finalizeExecution(nco);
+        finalizeExecution(nco,CheckOutputFlag);
         return nco;
     }
     
@@ -170,8 +174,12 @@ public class FlowExecutionEngine {
         return type == NodeType.SUCCESS || type == NodeType.FAILURE;
     }
 
-    private void finalizeExecution(NexflowContextObject nco) {
+    private void finalizeExecution(NexflowContextObject nco, boolean result) {
         nco.getMeta().setCompletedAt(Instant.now());
-        nco.getMeta().setStatus(ExecutionStatus.SUCCESS);
+        if (!result) {
+            nco.getMeta().setStatus(ExecutionStatus.FAILURE);
+        } else {
+            nco.getMeta().setStatus(ExecutionStatus.SUCCESS);
+        }
     }
 }

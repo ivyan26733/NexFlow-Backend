@@ -25,24 +25,6 @@ public class ExecutionController {
     // GET /api/executions — full history across all flows, newest first
     @GetMapping
     public List<ExecutionSummary> listAll() {
-        // List<Execution> executions = executionRepository.findAllByOrderByStartedAtDesc();
-
-        // // Build a lookup map so we don't hit the DB per row
-        // List<UUID> flowIds = executions.stream()
-        //         .map(Execution::getFlowId)
-        //         .distinct()
-        //         .collect(Collectors.toList());
-
-        // Map<UUID, String> flowNames = flowRepository.findAllById(flowIds).stream()
-        //         .collect(Collectors.toMap(Flow::getId, Flow::getName));
-
-        // Map<UUID, String> flowSlugs = flowRepository.findAllById(flowIds).stream()
-        //         .collect(Collectors.toMap(Flow::getId, Flow::getSlug));
-
-        // return executions.stream()
-        //         .map(e -> toSummary(e, flowNames, flowSlugs))
-        //         .collect(Collectors.toList())
-
 
         List<Execution> executions = executionRepository.findAllByOrderByStartedAtDesc();
 
