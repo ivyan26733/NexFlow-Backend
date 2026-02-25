@@ -40,13 +40,15 @@ public class FlowExecutionEngine {
         this.eventPublisher = eventPublisher;
     }
 
+    private static final UUID DEFAULT_START_NODE_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");
+
     public NexflowContextObject execute(UUID flowId, String executionId, Map<String, Object> triggerPayload) {
         NexflowContextObject nco = NexflowContextObject.create(flowId.toString(), executionId);
 
-        List<FlowNode> allNodes = nodeRepository.findByFlowId(flowId);
+        List<FlowNode> allNodes = new ArrayList<>(nodeRepository.findByFlowId(flowId));
         List<FlowEdge> allEdges = edgeRepository.findByFlowId(flowId);
 
-        FlowNode startNode = findStartNode(allNodes);
+        FlowNode startNode = findStartNodeOrCreateDefault(allNodes, flowId);
         injectTriggerPayload(startNode, nco, triggerPayload);
 
         Queue<FlowNode> queue = new LinkedList<>();
@@ -163,11 +165,22 @@ public class FlowExecutionEngine {
         return key.toString();
     }
 
-    private FlowNode findStartNode(List<FlowNode> nodes) {
+    private FlowNode findStartNodeOrCreateDefault(List<FlowNode> nodes, UUID flowId) {
         return nodes.stream()
                 .filter(n -> n.getNodeType() == NodeType.START)
                 .findFirst()
-                .orElseThrow(() -> new IllegalStateException("Flow has no START node"));
+                .orElseGet(() -> {
+                    FlowNode defaultStart = new FlowNode();
+                    defaultStart.setId(DEFAULT_START_NODE_ID);
+                    defaultStart.setFlowId(flowId);
+                    defaultStart.setNodeType(NodeType.START);
+                    defaultStart.setLabel("Start");
+                    defaultStart.setConfig(Map.of());
+                    defaultStart.setPositionX(0.0);
+                    defaultStart.setPositionY(0.0);
+                    nodes.add(defaultStart);
+                    return defaultStart;
+                });
     }
 
     private boolean isTerminal(NodeType type) {

@@ -14,6 +14,7 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -82,6 +83,12 @@ public class FlowService {
             String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
             log.error("Flow {} execution failed: {}", flowId, msg, ex);
             execution.setStatus(ExecutionStatus.FAILURE);
+            // Persist minimal snapshot so Transactions detail can show the error instead of "No node logs"
+            execution.setNcoSnapshot(Map.of(
+                    "nodes", Map.of(),
+                    "nodeExecutionOrder", List.of(),
+                    "error", msg
+            ));
         }
         execution.setCompletedAt(Instant.now());
         executionRepository.save(execution);

@@ -17,6 +17,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -105,6 +106,18 @@ public class SubFlowExecutor implements NodeExecutor {
         Map<String, Object> rawPayload = (Map<String, Object>) config.getOrDefault("payload", new HashMap<>());
         Map<String, Object> resolvedPayload = resolver.resolveMap(rawPayload, nco);
 
+        // If no payload configured, pass parent's trigger body so child receives input.trigger.body by default
+        if (resolvedPayload.isEmpty()) {
+            NodeContext startCtx = nco.getNodeOutput("start");
+            if (startCtx != null && startCtx.getOutput() != null && startCtx.getOutput().get("body") instanceof Map<?, ?> body) {
+                resolvedPayload = new HashMap<>((Map<String, Object>) body);
+                log.info("[SUB-FLOW] empty payload config — passing parent trigger body to child: {}", resolvedPayload);
+            }
+        }
+
+        log.info("[SUB-FLOW] triggering child flowId={}, targetFlowName={}, rawPayload={}, resolvedPayload={} (child receives this as input.trigger.body)",
+                targetFlowId, targetFlow.getName(), rawPayload, resolvedPayload);
+
         String triggeredBy = "SUB_FLOW:" + nco.getMeta().getExecutionId();
         Map<String, Object> inputSnapshot = Map.of(
             "targetFlowId",   targetFlowId,
@@ -140,14 +153,16 @@ public class SubFlowExecutor implements NodeExecutor {
             Execution childExecution = flowService.triggerFlowSync(targetUuid, resolvedPayload, triggeredBy);
             boolean   childSucceeded = "SUCCESS".equals(childExecution.getStatus().name());
 
+            Map<String, Object> childSnapshot = childExecution.getNcoSnapshot();
             Map<String, Object> output = new LinkedHashMap<>();
             output.put("executionId",   childExecution.getId().toString());
             output.put("status",        childExecution.getStatus().name());
             output.put("mode",          "SYNC");
             output.put("targetFlowId",  targetFlowId);
             output.put("targetFlowName", targetFlow.getName());
-            // Embed the full child NCO so parent can traverse child node outputs
-            output.put("nco",           childExecution.getNcoSnapshot());
+            output.put("nco",           childSnapshot);
+            // Convenience: last SCRIPT (or any) node's successOutput.result so parent can use input.nodes.subFlow.successOutput.result
+            output.put("result",        extractChildResult(childSnapshot));
 
             NodeStatus resultStatus = childSucceeded ? NodeStatus.SUCCESS : NodeStatus.FAILURE;
 
@@ -170,6 +185,34 @@ public class SubFlowExecutor implements NodeExecutor {
             log.error("SUB_FLOW node {} — child flow {} failed: {}", nodeId, targetFlowId, ex.getMessage());
             return failure(nodeId, inputSnapshot, "Child flow execution threw: " + ex.getMessage());
         }
+    }
+
+    /**
+     * Extracts a single "result" from the child NCO for parent scripts.
+     * Uses the last node in execution order that has successOutput.result (e.g. a SCRIPT node's return value).
+     * If that value is an object { result: x }, unwraps to x so parent gets the inner value directly.
+     */
+    @SuppressWarnings("unchecked")
+    private Object extractChildResult(Map<String, Object> childSnapshot) {
+        if (childSnapshot == null) return null;
+        Object orderObj = childSnapshot.get("nodeExecutionOrder");
+        Object nodesObj = childSnapshot.get("nodes");
+        if (!(orderObj instanceof List<?>) || !(nodesObj instanceof Map<?, ?> nodes)) return null;
+        List<String> nodeOrder = (List<String>) orderObj;
+        for (int i = nodeOrder.size() - 1; i >= 0; i--) {
+            Object nodeObj = nodes.get(nodeOrder.get(i));
+            if (!(nodeObj instanceof Map<?, ?> node)) continue;
+            Object successOutput = node.get("successOutput");
+            if (!(successOutput instanceof Map<?, ?> so)) continue;
+            Object result = so.get("result");
+            if (result == null) continue;
+            // Script nodes return { result: value }; unwrap so parent gets value directly
+            if (result instanceof Map<?, ?> map && map.containsKey("result")) {
+                return map.get("result");
+            }
+            return result;
+        }
+        return null;
     }
 
     // ── Helper ────────────────────────────────────────────────────────────────
