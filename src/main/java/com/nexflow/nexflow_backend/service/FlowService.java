@@ -32,8 +32,9 @@ public class FlowService {
      * Triggers a flow and returns immediately with the execution (status RUNNING).
      * The actual execution runs in the background so the frontend can subscribe to
      * WebSocket events before they are sent. Used by Pulse API (Studio Trigger).
+     * @param waitForSubscriber when true, delays execution start by 1.5s so Studio can connect/subscribe first
      */
-    public Execution triggerFlow(UUID flowId, Map<String, Object> payload, String triggeredBy) {
+    public Execution triggerFlow(UUID flowId, Map<String, Object> payload, String triggeredBy, boolean waitForSubscriber) {
         flowRepository.findById(flowId)
                 .orElseThrow(() -> new IllegalArgumentException("Flow not found: " + flowId));
 
@@ -42,8 +43,13 @@ public class FlowService {
         execution.setTriggeredBy(triggeredBy);
         execution = executionRepository.save(execution);
         final UUID executionId = execution.getId();
-        log.info("[WS-DEBUG] triggerFlow: returning executionId={} immediately (client should subscribe to /topic/execution/{})", executionId, executionId);
-        CompletableFuture.runAsync(() -> runExecutionInBackground(executionId, flowId, payload));
+        log.info("[WS-DEBUG] triggerFlow: returning executionId={} immediately (client should subscribe to /topic/execution/{}){}", executionId, executionId, waitForSubscriber ? ", delaying start 1.5s for subscriber" : "");
+        Runnable run = () -> runExecutionInBackground(executionId, flowId, payload);
+        if (waitForSubscriber) {
+            CompletableFuture.delayedExecutor(1500, java.util.concurrent.TimeUnit.MILLISECONDS, java.util.concurrent.ForkJoinPool.commonPool()).execute(run);
+        } else {
+            CompletableFuture.runAsync(run);
+        }
         return execution;
     }
 
@@ -90,7 +96,7 @@ public class FlowService {
      * Convenience overload — keeps PulseController call-site clean.
      */
     public Execution triggerFlow(UUID flowId, Map<String, Object> payload) {
-        return triggerFlow(flowId, payload, "PULSE");
+        return triggerFlow(flowId, payload, "PULSE", false);
     }
 
     /**

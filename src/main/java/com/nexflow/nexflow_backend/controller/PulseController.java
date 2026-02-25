@@ -23,10 +23,12 @@ public class PulseController {
     @PostMapping("/{slugOrId}")
     public ResponseEntity<Execution> trigger(
             @PathVariable String slugOrId,
-            @RequestBody(required = false) Map<String, Object> payload) {
+            @RequestBody(required = false) Map<String, Object> payload,
+            @RequestHeader(value = "X-Wait-For-Subscriber", required = false) String waitForSubscriber) {
 
         UUID flowId = resolveFlowId(slugOrId);
-        Execution result = flowService.triggerFlow(flowId, payload != null ? payload : Map.of());
+        boolean delayStart = "1".equals(waitForSubscriber);
+        Execution result = flowService.triggerFlow(flowId, payload != null ? payload : Map.of(), "PULSE", delayStart);
         return ResponseEntity.ok(result);
     }
 
