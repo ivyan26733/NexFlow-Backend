@@ -22,6 +22,7 @@ public class ExecutionEventPublisher {
                                   @Autowired(required = false) RedisWebSocketBridge redisBridge) {
         this.messagingTemplate = messagingTemplate;
         this.redisBridge = redisBridge;
+        log.info("[WS-DEBUG] ExecutionEventPublisher: redisBridge={} (use Redis for WebSocket when present)", redisBridge != null ? "PRESENT" : "NULL");
     }
 
     public void nodeStarted(String executionId, String nodeId) {
