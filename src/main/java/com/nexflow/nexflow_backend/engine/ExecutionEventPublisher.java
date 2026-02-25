@@ -2,7 +2,7 @@ package com.nexflow.nexflow_backend.engine;
 
 import com.nexflow.nexflow_backend.model.nco.NodeStatus;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Component;
 
@@ -13,16 +13,15 @@ import java.util.Map;
 public class ExecutionEventPublisher {
 
     private final SimpMessagingTemplate messagingTemplate;
-    private final RedisWebSocketBridge redisBridge;
+    private final ObjectProvider<RedisWebSocketBridge> redisBridgeProvider;
 
     // Studio subscribes to /topic/execution/{executionId} to receive live updates
     private static final String TOPIC = "/topic/execution/";
 
     public ExecutionEventPublisher(SimpMessagingTemplate messagingTemplate,
-                                  @Autowired(required = false) RedisWebSocketBridge redisBridge) {
+                                  ObjectProvider<RedisWebSocketBridge> redisBridgeProvider) {
         this.messagingTemplate = messagingTemplate;
-        this.redisBridge = redisBridge;
-        log.info("[WS-DEBUG] ExecutionEventPublisher: redisBridge={} (use Redis for WebSocket when present)", redisBridge != null ? "PRESENT" : "NULL");
+        this.redisBridgeProvider = redisBridgeProvider;
     }
 
     public void nodeStarted(String executionId, String nodeId) {
@@ -44,10 +43,11 @@ public class ExecutionEventPublisher {
                 "error",  error != null ? error : ""
         );
         String destination = TOPIC + executionId;
+        RedisWebSocketBridge bridge = redisBridgeProvider.getIfAvailable();
         log.info("[WS-DEBUG] ExecutionEventPublisher.publish: destination={}, nodeId={}, status={}, via={}",
-                destination, nodeId, status, redisBridge != null ? "Redis" : "Direct");
-        if (redisBridge != null) {
-            redisBridge.publish(destination, payload);
+                destination, nodeId, status, bridge != null ? "Redis" : "Direct");
+        if (bridge != null) {
+            bridge.publish(destination, payload);
         } else {
             messagingTemplate.convertAndSend(destination, payload);
         }
