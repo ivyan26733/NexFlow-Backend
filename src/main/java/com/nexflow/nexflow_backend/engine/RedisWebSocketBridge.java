@@ -34,6 +34,8 @@ public class RedisWebSocketBridge implements MessageListener {
     public void publish(String destination, Map<String, Object> payload) {
         try {
             String json = objectMapper.writeValueAsString(new StompMessage(destination, payload));
+            log.info("[WS-DEBUG] RedisWebSocketBridge.publish: destination={}, nodeId={} -> Redis channel {}",
+                    destination, payload.get("nodeId"), REDIS_CHANNEL);
             redisTemplate.convertAndSend(REDIS_CHANNEL, json);
         } catch (JsonProcessingException e) {
             log.error("Failed to serialize WebSocket message for {}", destination, e);
@@ -45,6 +47,8 @@ public class RedisWebSocketBridge implements MessageListener {
         try {
             String body = new String(message.getBody());
             StompMessage stomp = objectMapper.readValue(body, StompMessage.class);
+            log.info("[WS-DEBUG] RedisWebSocketBridge.onMessage: received from Redis, forwarding to destination={}, nodeId={}",
+                    stomp.destination, stomp.payload.get("nodeId"));
             messagingTemplate.convertAndSend(stomp.destination, stomp.payload);
         } catch (Exception e) {
             log.error("Failed to forward Redis message to WebSocket", e);

@@ -1,12 +1,14 @@
 package com.nexflow.nexflow_backend.engine;
 
 import com.nexflow.nexflow_backend.model.nco.NodeStatus;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
 
+@Slf4j
 @Component
 public class ExecutionEventPublisher {
 
@@ -41,6 +43,8 @@ public class ExecutionEventPublisher {
                 "error",  error != null ? error : ""
         );
         String destination = TOPIC + executionId;
+        log.info("[WS-DEBUG] ExecutionEventPublisher.publish: destination={}, nodeId={}, status={}, via={}",
+                destination, nodeId, status, redisBridge != null ? "Redis" : "Direct");
         if (redisBridge != null) {
             redisBridge.publish(destination, payload);
         } else {

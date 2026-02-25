@@ -42,6 +42,7 @@ public class FlowService {
         execution.setTriggeredBy(triggeredBy);
         execution = executionRepository.save(execution);
         final UUID executionId = execution.getId();
+        log.info("[WS-DEBUG] triggerFlow: returning executionId={} immediately (client should subscribe to /topic/execution/{})", executionId, executionId);
         CompletableFuture.runAsync(() -> runExecutionInBackground(executionId, flowId, payload));
         return execution;
     }
@@ -66,6 +67,7 @@ public class FlowService {
     }
 
     private void runExecutionInBackground(UUID executionId, UUID flowId, Map<String, Object> payload) {
+        log.info("[WS-DEBUG] runExecutionInBackground: starting executionId={}, flowId={}", executionId, flowId);
         Execution execution = executionRepository.findById(executionId)
                 .orElseThrow(() -> new IllegalStateException("Execution not found: " + executionId));
         try {
@@ -79,6 +81,7 @@ public class FlowService {
         }
         execution.setCompletedAt(Instant.now());
         executionRepository.save(execution);
+        log.info("[WS-DEBUG] runExecutionInBackground: finished executionId={}, status={}", executionId, execution.getStatus());
     }
 
     
