@@ -41,7 +41,6 @@ public class FlowExecutionEngine {
     }
 
     public NexflowContextObject execute(UUID flowId, String executionId, Map<String, Object> triggerPayload) {
-        log.info("[WS-DEBUG] FlowExecutionEngine.execute: flowId={}, executionId={}", flowId, executionId);
         NexflowContextObject nco = NexflowContextObject.create(flowId.toString(), executionId);
 
         List<FlowNode> allNodes = nodeRepository.findByFlowId(flowId);
@@ -58,7 +57,6 @@ public class FlowExecutionEngine {
             FlowNode current = queue.poll();
             nco.getMeta().setCurrentNodeId(current.getId().toString());
 
-            log.info("[WS-DEBUG] nodeStarted: executionId={}, nodeId={}", executionId, current.getId());
             eventPublisher.nodeStarted(executionId, current.getId().toString());
             NodeContext result = runNode(current, nco);
             // Do not overwrite START node output (set in injectTriggerPayload with output.body)
@@ -66,7 +64,6 @@ public class FlowExecutionEngine {
                 nco.setNodeOutput(current.getId().toString(), result);
                 nco.setNodeAlias(toLabelKey(current.getLabel()), result);
             }
-            log.info("[WS-DEBUG] nodeCompleted: executionId={}, nodeId={}, status={}", executionId, current.getId(), result.getStatus());
             eventPublisher.nodeCompleted(executionId, current.getId().toString(), result.getStatus());
             nco.getNodeExecutionOrder().add(current.getId().toString());
 

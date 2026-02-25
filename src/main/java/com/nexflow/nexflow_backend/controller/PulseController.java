@@ -5,14 +5,12 @@ import com.nexflow.nexflow_backend.model.domain.Flow;
 import com.nexflow.nexflow_backend.repository.FlowRepository;
 import com.nexflow.nexflow_backend.service.FlowService;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
 import java.util.UUID;
 
-@Slf4j
 @RestController
 @RequestMapping("/api/pulse")
 @RequiredArgsConstructor
@@ -30,9 +28,6 @@ public class PulseController {
 
         UUID flowId = resolveFlowId(slugOrId);
         boolean delayStart = "1".equals(waitForSubscriber);
-        if (waitForSubscriber != null) {
-            log.info("[WS-DEBUG] PulseController: X-Wait-For-Subscriber={}, delayStart={}", waitForSubscriber, delayStart);
-        }
         Execution result = flowService.triggerFlow(flowId, payload != null ? payload : Map.of(), "PULSE", delayStart);
         return ResponseEntity.ok(result);
     }
