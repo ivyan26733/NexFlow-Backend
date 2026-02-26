@@ -161,6 +161,28 @@ public class FlowController {
         return executionRepository.findByFlowIdOrderByStartedAtDesc(flowId);
     }
 
+    /**
+     * Delete a flow (\"studio\") and all of its persisted state:
+     * - all executions/transactions for this flow
+     * - all nodes & edges in its canvas
+     *
+     * Pulse endpoints and external APIs are not separate entities here:
+     * deleting the Flow simply removes the ability to trigger it; Nexus
+     * connectors and other APIs remain untouched.
+     */
+    @Transactional
+    @DeleteMapping("/{flowId}")
+    public ResponseEntity<Void> deleteFlow(@PathVariable UUID flowId) {
+        if (flowRepository.findById(flowId).isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+        executionRepository.deleteAll(executionRepository.findByFlowIdOrderByStartedAtDesc(flowId));
+        nodeRepository.deleteAll(nodeRepository.findByFlowId(flowId));
+        edgeRepository.deleteAll(edgeRepository.findByFlowId(flowId));
+        flowRepository.deleteById(flowId);
+        return ResponseEntity.noContent().build();
+    }
+
     /** Response type for GET canvas; also used internally for the saved entities. */
     public record CanvasSaveRequest(List<FlowNode> nodes, List<FlowEdge> edges) {}
 }
