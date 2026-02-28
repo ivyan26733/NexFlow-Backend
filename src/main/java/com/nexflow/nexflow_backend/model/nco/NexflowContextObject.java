@@ -32,6 +32,10 @@ public class NexflowContextObject {
     @Builder.Default
     private Map<String, NodeContext> nodeAliases = new LinkedHashMap<>();
 
+    /** Universal flat container for named outputs: nodes with saveOutputAs store output here; resolve via {{nex.NAME.field}}. Keys are case-sensitive. */
+    @Builder.Default
+    private Map<String, Object> nex = new LinkedHashMap<>();
+
     // Explicit execution order — jsonb reorders object keys, so we keep a list (arrays stay ordered)
     @Builder.Default
     private List<String> nodeExecutionOrder = new ArrayList<>();

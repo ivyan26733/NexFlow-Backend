@@ -137,6 +137,7 @@ public class DecisionExecutor implements NodeExecutor {
         NodeContext startCtx = nco.getNodeOutput("start");
         Object triggerOutput = startCtx != null ? startCtx.getOutput() : null;
         input.put("trigger", triggerOutput);
+        input.put("nex", nco.getNex() != null ? nco.getNex() : new java.util.LinkedHashMap<>());
         return input;
     }
 

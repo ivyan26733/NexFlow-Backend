@@ -54,6 +54,23 @@ public class ExecutionController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
+    // GET /api/executions/{id}/nex — convenience: only the nex map from the transaction snapshot
+    @GetMapping("/{id}/nex")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<Map<String, Object>> getNex(@PathVariable UUID id) {
+        return executionRepository.findById(id)
+                .map(exec -> {
+                    Map<String, Object> nco = exec.getNcoSnapshot();
+                    Object nex = nco != null ? nco.get("nex") : null;
+                    Map<String, Object> nexMap = nex instanceof Map ? (Map<String, Object>) nex : Map.of();
+                    return ResponseEntity.ok(Map.<String, Object>of(
+                            "transactionId", exec.getId().toString(),
+                            "nex", nexMap
+                    ));
+                })
+                .orElse(ResponseEntity.notFound().build());
+    }
+
     // ── DTOs ─────────────────────────────────────────────────────────────────
 
     private ExecutionSummary toSummary(Execution e, Map<UUID, Flow> flowsById) {

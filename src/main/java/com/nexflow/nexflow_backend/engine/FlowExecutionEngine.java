@@ -8,6 +8,8 @@ import com.nexflow.nexflow_backend.model.nco.ExecutionStatus;
 import com.nexflow.nexflow_backend.model.nco.NexflowContextObject;
 import com.nexflow.nexflow_backend.model.nco.NodeContext;
 import com.nexflow.nexflow_backend.model.nco.NodeStatus;
+import com.nexflow.nexflow_backend.model.nco.RetryConfig;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nexflow.nexflow_backend.repository.FlowEdgeRepository;
 import com.nexflow.nexflow_backend.repository.FlowNodeRepository;
 import lombok.extern.slf4j.Slf4j;
@@ -15,32 +17,42 @@ import org.springframework.stereotype.Service;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Queue;
+import java.util.Set;
 import java.util.UUID;
 
 @Slf4j
 @Service
 public class FlowExecutionEngine {
 
-    private final FlowNodeRepository nodeRepository;
-    private final FlowEdgeRepository edgeRepository;
-    private final NodeExecutorRegistry executorRegistry;
-    private final ExecutionEventPublisher eventPublisher;
+    private final FlowNodeRepository       nodeRepository;
+    private final FlowEdgeRepository       edgeRepository;
+    private final NodeExecutorRegistry     executorRegistry;
+    private final ExecutionEventPublisher  eventPublisher;
+    private final ObjectMapper             objectMapper;
 
-    public FlowExecutionEngine(FlowNodeRepository nodeRepository, FlowEdgeRepository edgeRepository,
-                               NodeExecutorRegistry executorRegistry, ExecutionEventPublisher eventPublisher) {
+    public FlowExecutionEngine(FlowNodeRepository nodeRepository,
+                               FlowEdgeRepository edgeRepository,
+                               NodeExecutorRegistry executorRegistry,
+                               ExecutionEventPublisher eventPublisher,
+                               ObjectMapper objectMapper) {
         this.nodeRepository = nodeRepository;
         this.edgeRepository = edgeRepository;
         this.executorRegistry = executorRegistry;
         this.eventPublisher = eventPublisher;
+        this.objectMapper = objectMapper;
     }
 
     private static final UUID DEFAULT_START_NODE_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");
+
+    /** Hard cap on node executions per run to avoid infinite loops; does not kill the process, just exits cleanly. */
+    private static final int MAX_NODE_EXECUTIONS = 5_000;
 
     public NexflowContextObject execute(UUID flowId, String executionId, Map<String, Object> triggerPayload) {
         NexflowContextObject nco = NexflowContextObject.create(flowId.toString(), executionId);
@@ -51,40 +63,106 @@ public class FlowExecutionEngine {
         FlowNode startNode = findStartNodeOrCreateDefault(allNodes, flowId);
         injectTriggerPayload(startNode, nco, triggerPayload);
 
+        Map<UUID, FlowNode> nodeMap = new HashMap<>();
+        allNodes.forEach(n -> nodeMap.put(n.getId(), n));
+        for (FlowNode n : allNodes) {
+            if (n.getNodeType() == NodeType.LOOP) {
+                boolean hasContinue = allEdges.stream()
+                    .anyMatch(e -> e.getSourceNodeId().equals(n.getId()) && e.getConditionType() == EdgeCondition.CONTINUE);
+                if (nco.getMeta().getLoopNodeHasContinueEdge() == null) {
+                    nco.getMeta().setLoopNodeHasContinueEdge(new HashMap<>());
+                }
+                nco.getMeta().getLoopNodeHasContinueEdge().put(n.getId().toString(), hasContinue);
+            }
+        }
+
         Queue<FlowNode> queue = new LinkedList<>();
         queue.add(startNode);
         boolean CheckOutputFlag = true;
+        Set<UUID> executedNodeIds = new HashSet<>();
 
         while (!queue.isEmpty()) {
             FlowNode current = queue.poll();
             nco.getMeta().setCurrentNodeId(current.getId().toString());
 
+            // Safety: max steps to avoid runaway execution (no process kill, clean exit)
+            if (nco.getNodeExecutionOrder().size() >= MAX_NODE_EXECUTIONS) {
+                log.warn("Execution {} stopped: max steps ({}) exceeded. Possible loop in flow.", executionId, MAX_NODE_EXECUTIONS);
+                nco.getMeta().setErrorMessage(
+                    "Execution stopped: max steps exceeded (" + MAX_NODE_EXECUTIONS + "). Possible loop in flow (e.g. SubFlow ↔ Script). Fix the flow to remove cycles."
+                );
+                CheckOutputFlag = false;
+                break;
+            }
+
             eventPublisher.nodeStarted(executionId, current.getId().toString());
-            NodeContext result = runNode(current, nco);
+            NodeContext result = runNode(current, nco, executionId);
             // Do not overwrite START node output (set in injectTriggerPayload with output.body)
             if (!current.getId().equals(startNode.getId())) {
                 nco.setNodeOutput(current.getId().toString(), result);
                 nco.setNodeAlias(toLabelKey(current.getLabel()), result);
+                // Check if this node wants to save output into nex (skip VARIABLE/LOOP — they handle nex themselves where needed)
+                if (current.getNodeType() != NodeType.VARIABLE && current.getNodeType() != NodeType.LOOP) {
+                    String saveAs = extractSaveOutputAs(current);
+                    if (saveAs != null && !saveAs.isBlank()) {
+                        String key = saveAs.trim();
+                        if (key.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
+                            Object valueForNex = result.getSuccessOutput() != null ? result.getSuccessOutput() : result.getOutput();
+                            if (valueForNex != null) {
+                                if (nco.getNex().containsKey(key)) {
+                                    log.warn("saveOutputAs '{}' on node '{}' overwrites existing nex entry from an earlier node.", key, current.getLabel());
+                                }
+                                nco.getNex().put(key, valueForNex);
+                            }
+                        } else {
+                            log.warn("saveOutputAs value '{}' on node '{}' is not a valid key. Only letters, numbers, underscore allowed. Skipping.", key, current.getLabel());
+                        }
+                    }
+                }
             }
-            eventPublisher.nodeCompleted(executionId, current.getId().toString(), result.getStatus());
+            eventPublisher.nodeCompleted(executionId, current.getId().toString(), result.getStatus(), nco.getNex());
             nco.getNodeExecutionOrder().add(current.getId().toString());
-
+            executedNodeIds.add(current.getId());
 
             if(result.getStatus() == NodeStatus.FAILURE) CheckOutputFlag = false;
 
             if(isTerminal(current.getNodeType())) break;
 
-            // Copy to mutable list (resolveNextNodes returns immutable toList()); sort so non-terminals run before SUCCESS/FAILURE
+            // Resolve next nodes, then filter: allow re-entry only for LOOP nodes (intentional); others = cycle → FAILURE
             List<FlowNode> nextNodes = new ArrayList<>(resolveNextNodes(current, result.getStatus(), allEdges, allNodes));
             nextNodes.sort(Comparator.comparing((FlowNode n) -> isTerminal(n.getNodeType()) ? 1 : 0));
-            queue.addAll(nextNodes);
+
+            List<FlowNode> toEnqueue = new ArrayList<>();
+            for (FlowNode next : nextNodes) {
+                if (!executedNodeIds.contains(next.getId())) {
+                    toEnqueue.add(next);
+                } else {
+                    // Re-entry: allow when following LOOP's CONTINUE edge (loop back to body), or when next is a LOOP node
+                    boolean allowReEntry = result.getStatus() == NodeStatus.CONTINUE
+                        || (nodeMap.get(next.getId()) != null && nodeMap.get(next.getId()).getNodeType() == NodeType.LOOP);
+                    if (allowReEntry) {
+                        toEnqueue.add(next);
+                    }
+                }
+            }
+
+            if (!nextNodes.isEmpty() && toEnqueue.isEmpty()) {
+                // All next nodes were already executed and re-entry not allowed (no CONTINUE edge, no LOOP) → accidental cycle
+                log.warn("Execution {} stopped: loop detected. Flow would re-enter node(s) that already ran.", executionId);
+                nco.getMeta().setErrorMessage(
+                    "Loop detected: execution would re-enter a node that already ran. Check for cycles in the flow (e.g. SubFlow connected back to Script, or two nodes pointing to each other). Remove the cycle to fix."
+                );
+                CheckOutputFlag = false;
+                break;
+            }
+            queue.addAll(toEnqueue);
         }
 
-        finalizeExecution(nco,CheckOutputFlag);
+        finalizeExecution(nco, CheckOutputFlag);
         return nco;
     }
     
-    private NodeContext runNode(FlowNode flowNode, NexflowContextObject nco) {
+    private NodeContext runNode(FlowNode flowNode, NexflowContextObject nco, String executionId) {
         NodeType nodeType = flowNode.getNodeType();
         if (nodeType == null) {
             log.error("Node {} has null nodeType", flowNode.getId());
@@ -95,26 +173,100 @@ public class FlowExecutionEngine {
                     .errorMessage("Node type is null")
                     .build();
         }
+
+        RetryConfig retry = extractRetryConfig(flowNode);
+        int maxRetries = Math.max(0, Math.min(10, retry.getMaxRetries()));
+        long delayMs = retry.getBackoffMs() > 0 ? retry.getBackoffMs() : 1000L;
+        double multiplier = retry.getBackoffMultiplier() > 0 ? retry.getBackoffMultiplier() : 1.0d;
+
+        int attempt = 0;
+        NodeContext lastContext = null;
+
+        while (true) {
+            attempt++;
+            try {
+                lastContext = executorRegistry.get(nodeType).execute(flowNode, nco);
+            } catch (Exception ex) {
+                String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+                log.error("Node {} ({}) threw on attempt {}: {}", flowNode.getId(), nodeType, attempt, msg, ex);
+                lastContext = NodeContext.builder()
+                        .nodeId(flowNode.getId().toString())
+                        .nodeType(nodeType.name())
+                        .status(NodeStatus.FAILURE)
+                        .errorMessage(msg)
+                        .build();
+            }
+
+            if (lastContext.getStatus() != NodeStatus.FAILURE) {
+                return lastContext;
+            }
+
+            if (attempt > maxRetries) {
+                // All retries exhausted — return last FAILURE context
+                return lastContext;
+            }
+
+            long waitMs = delayMs;
+            log.warn("Node {} ({}) failed on attempt {}/{}. Retrying in {} ms",
+                    flowNode.getId(), nodeType, attempt, maxRetries + 1, waitMs);
+            eventPublisher.nodeRetrying(executionId, flowNode.getId().toString());
+
+            try {
+                Thread.sleep(waitMs);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                log.warn("Retry sleep interrupted for node {} — aborting further retries", flowNode.getId());
+                return lastContext;
+            }
+
+            // Exponential backoff for next attempt
+            delayMs = (long) Math.max(0L, delayMs * multiplier);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private RetryConfig extractRetryConfig(FlowNode flowNode) {
+        Map<String, Object> cfg = flowNode.getConfig();
+        if (cfg == null || !cfg.containsKey("retry")) {
+            return new RetryConfig();
+        }
+        Object raw = cfg.get("retry");
         try {
-            return executorRegistry.get(nodeType).execute(flowNode, nco);
-        } catch (Exception ex) {
-            String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
-            log.error("Node {} ({}): {}", flowNode.getId(), nodeType, msg, ex);
-            return NodeContext.builder()
-                    .nodeId(flowNode.getId().toString())
-                    .nodeType(nodeType.name())
-                    .status(NodeStatus.FAILURE)
-                    .errorMessage(msg)
-                    .build();
+            RetryConfig retry;
+            if (raw instanceof Map<?, ?> map) {
+                retry = objectMapper.convertValue(map, RetryConfig.class);
+            } else {
+                retry = objectMapper.convertValue(raw, RetryConfig.class);
+            }
+            // Defensive bounds so bad config cannot explode the engine
+            int maxRetries = Math.max(0, Math.min(10, retry.getMaxRetries()));
+            retry.setMaxRetries(maxRetries);
+            if (retry.getBackoffMs() <= 0L) {
+                retry.setBackoffMs(1000L);
+            }
+            if (retry.getBackoffMultiplier() <= 0d) {
+                retry.setBackoffMultiplier(1.0d);
+            }
+            return retry;
+        } catch (IllegalArgumentException ex) {
+            log.warn("Failed to parse retry config for node {}: {}", flowNode.getId(), ex.getMessage());
+            return new RetryConfig();
         }
     }
 
     // Finds nodes reachable from current node based on the node's outcome
     private List<FlowNode> resolveNextNodes(FlowNode current, NodeStatus outcome,
                                             List<FlowEdge> allEdges, List<FlowNode> allNodes) {
-        EdgeCondition requiredCondition = outcome == NodeStatus.SUCCESS
-                ? EdgeCondition.SUCCESS
-                : EdgeCondition.FAILURE;
+        EdgeCondition requiredCondition;
+        if (outcome == NodeStatus.SUCCESS) {
+            requiredCondition = EdgeCondition.SUCCESS;
+        } else if (outcome == NodeStatus.FAILURE) {
+            requiredCondition = EdgeCondition.FAILURE;
+        } else if (outcome == NodeStatus.CONTINUE) {
+            requiredCondition = EdgeCondition.CONTINUE;
+        } else {
+            requiredCondition = EdgeCondition.DEFAULT;
+        }
 
         Map<UUID, FlowNode> nodeMap = new HashMap<>();
         allNodes.forEach(n -> nodeMap.put(n.getId(), n));
@@ -146,6 +298,14 @@ public class FlowExecutionEngine {
                 .build();
         nco.setNodeOutput(startNode.getId().toString(), startCtx);
         nco.setNodeAlias("start", startCtx);
+        // If START node has "Save output as", put trigger payload in nex so input.nex.start works in child flows
+        String saveAs = extractSaveOutputAs(startNode);
+        if (saveAs != null && !saveAs.isBlank()) {
+            String key = saveAs.trim();
+            if (key.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
+                nco.getNex().put(key, output);
+            }
+        }
     }
 
     /**
@@ -181,6 +341,17 @@ public class FlowExecutionEngine {
                     nodes.add(defaultStart);
                     return defaultStart;
                 });
+    }
+
+    private String extractSaveOutputAs(FlowNode node) {
+        try {
+            Map<String, Object> config = node.getConfig();
+            if (config == null) return null;
+            Object val = config.get("saveOutputAs");
+            return val != null ? val.toString() : null;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private boolean isTerminal(NodeType type) {

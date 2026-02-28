@@ -26,7 +26,8 @@ import java.util.Map;
  * {
  *   "variables": { ...all flow variables... },
  *   "nodes": { ...all previous node outputs, keyed by nodeId... },
- *   "trigger": { ...the original trigger payload from the START node... }
+ *   "trigger": { ...the original trigger payload from the START node... },
+ *   "nex": { ...named outputs from nodes with "Save output as" (e.g. input.nex.sub, input.nex.userData)... }
  * }
  *
  * JavaScript: use `return` to return a value.
@@ -65,8 +66,14 @@ public class ScriptExecutor implements NodeExecutor {
         ScriptRunner.ScriptResult result = scriptRunner.run(language, code, scriptInput);
 
         if (result.success()) {
+            Object output = result.output();
+            // Treat null or { result: null } as failure so the flow can route to the failure edge
+            if (isNullOrEmptyResult(output)) {
+                return failure(nodeId,
+                    "Script returned null or no value. Return a non-null value for success, or throw an error to fail.");
+            }
             Map<String, Object> successOutput = new LinkedHashMap<>();
-            successOutput.put("result",   result.output());
+            successOutput.put("result",   output);
             successOutput.put("language", language);
 
             return NodeContext.builder()
@@ -99,7 +106,24 @@ public class ScriptExecutor implements NodeExecutor {
         Object triggerOutput = startCtx != null ? startCtx.getOutput() : null;
         input.put("trigger", triggerOutput);
 
+        // Named outputs from nodes with "Save output as" (input.nex.sub, input.nex.userData, etc.)
+        input.put("nex", nco.getNex() != null ? nco.getNex() : new LinkedHashMap<>());
+
         return input;
+    }
+
+    /**
+     * Returns true if the script output should be treated as failure: null, or object { result: null }.
+     */
+    @SuppressWarnings("unchecked")
+    private boolean isNullOrEmptyResult(Object output) {
+        if (output == null) return true;
+        if (output instanceof Map<?, ?> map) {
+            if (map.containsKey("result") && map.size() == 1) {
+                return ((Map<String, Object>) map).get("result") == null;
+            }
+        }
+        return false;
     }
 
     private NodeContext failure(String nodeId, String error) {

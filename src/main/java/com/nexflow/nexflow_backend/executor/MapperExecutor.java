@@ -32,7 +32,7 @@ public class MapperExecutor implements NodeExecutor {
      *   }
      * }
      *
-     * The resolved output becomes the input for the next PULSE node.
+     * The resolved output becomes the input for the next node (e.g. NEXUS).
      */
 
     @Override

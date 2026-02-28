@@ -47,15 +47,20 @@ public class NexusExecutor implements NodeExecutor {
         return NodeType.NEXUS;
     }
 
+    /**
+     * Two modes:
+     * 1) Inline HTTP: no connectorId; config has url, method, headers, body (same shape as legacy HTTP Call node).
+     * 2) Connector: connectorId set → load NexusConnector and run REST or JDBC.
+     */
     @Override
     @SuppressWarnings("unchecked")
     public NodeContext execute(FlowNode node, NexflowContextObject nco) {
-        Map<String, Object> config    = node.getConfig();
-        String              nodeId    = node.getId().toString();
-        String              connectorId = (String) config.get("connectorId");
+        Map<String, Object> config      = node.getConfig();
+        String              nodeId      = node.getId().toString();
+        String              connectorId = config != null ? (String) config.get("connectorId") : null;
 
         if (connectorId == null || connectorId.isBlank()) {
-            return failureContext(nodeId, null, "NEXUS node has no connectorId configured");
+            return executeInlineRest(nodeId, config, nco);
         }
 
         NexusConnector connector = connectorRepository.findById(UUID.fromString(connectorId))
@@ -68,6 +73,56 @@ public class NexusExecutor implements NodeExecutor {
         return "JDBC".equalsIgnoreCase(connector.getConnectorType())
                 ? executeJdbc(nodeId, connector, config, nco)
                 : executeRest(nodeId, connector, config, nco);
+    }
+
+    /** Inline HTTP (no connector): config has url, method, headers, body. Same output shape as connector REST for compatibility. */
+    @SuppressWarnings("unchecked")
+    private NodeContext executeInlineRest(String nodeId, Map<String, Object> config, NexflowContextObject nco) {
+        if (config == null) return failureContext(nodeId, null, "NEXUS inline HTTP: no config");
+        String url    = resolver.resolve((String) config.get("url"), nco);
+        String method = (String) config.getOrDefault("method", "GET");
+        if (url == null || url.isBlank()) {
+            return failureContext(nodeId, null, "NEXUS inline HTTP: url is required");
+        }
+        Map<String, Object> headers = resolver.resolveMap((Map<String, Object>) config.getOrDefault("headers", new HashMap<>()), nco);
+        Map<String, Object> body   = resolver.resolveMap((Map<String, Object>) config.getOrDefault("body", new HashMap<>()), nco);
+
+        try {
+            HttpHeaders httpHeaders = new HttpHeaders();
+            httpHeaders.setContentType(MediaType.APPLICATION_JSON);
+            headers.forEach((k, v) -> httpHeaders.set(k, String.valueOf(v)));
+
+            HttpEntity<Map<String, Object>> request = new HttpEntity<>(body, httpHeaders);
+            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.valueOf(method.toUpperCase()), request, String.class);
+
+            Map<String, Object> successOutput = new LinkedHashMap<>();
+            successOutput.put("statusCode", response.getStatusCode().value());
+            successOutput.put("body",       parseBody(response.getBody()));
+            successOutput.put("headers",    response.getHeaders().toSingleValueMap());
+
+            return NodeContext.builder()
+                    .nodeId(nodeId).nodeType(NodeType.NEXUS.name())
+                    .status(NodeStatus.SUCCESS)
+                    .input(Map.of("url", url, "method", method, "body", body))
+                    .successOutput(successOutput)
+                    .build();
+
+        } catch (HttpStatusCodeException ex) {
+            Map<String, Object> failureOutput = new LinkedHashMap<>();
+            failureOutput.put("statusCode", ex.getStatusCode().value());
+            failureOutput.put("body",       parseBody(ex.getResponseBodyAsString()));
+            failureOutput.put("error",      ex.getMessage());
+            return NodeContext.builder()
+                    .nodeId(nodeId).nodeType(NodeType.NEXUS.name())
+                    .status(NodeStatus.FAILURE)
+                    .input(Map.of("url", url, "method", method, "body", body))
+                    .failureOutput(failureOutput)
+                    .errorMessage(ex.getMessage())
+                    .build();
+        } catch (Exception ex) {
+            log.error("NEXUS inline HTTP node {} failed: {}", nodeId, ex.getMessage());
+            return failureContext(nodeId, Map.of("url", url, "method", method), ex.getMessage());
+        }
     }
 
     // ── REST execution ────────────────────────────────────────────────────────

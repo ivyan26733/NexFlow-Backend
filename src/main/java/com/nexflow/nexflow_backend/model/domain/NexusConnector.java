@@ -11,7 +11,7 @@ import java.util.UUID;
 
 /**
  * Nexus Connector — a reusable API connection definition.
- * Users create these once and reference them by name in PULSE nodes
+ * Users create these once and reference them in NEXUS (HTTP Call) nodes
  * instead of re-entering base URLs and auth headers on every node.
  *
  * Example: { name: "Stripe", baseUrl: "https://api.stripe.com", headers: { "Authorization": "Bearer sk_..." } }
@@ -43,7 +43,7 @@ public class NexusConnector {
     @Column(name = "auth_type")
     private String authType = "NONE";
 
-    // Default headers — merged into every PULSE node that uses this connector
+    // Default headers — merged into every NEXUS node that uses this connector
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "default_headers")
     private Map<String, String> defaultHeaders;

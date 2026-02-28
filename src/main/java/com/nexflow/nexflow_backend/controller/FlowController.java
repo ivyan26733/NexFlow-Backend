@@ -14,7 +14,10 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 @RestController
@@ -64,6 +67,24 @@ public class FlowController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
+    @PutMapping("/{flowId}")
+    public ResponseEntity<Flow> updateFlow(@PathVariable UUID flowId, @RequestBody Map<String, String> body) {
+        if (body == null || !body.containsKey("name")) {
+            return ResponseEntity.badRequest().build();
+        }
+        String name = body.get("name");
+        if (name == null || name.isBlank()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return flowRepository.findById(flowId)
+                .map(flow -> {
+                    flow.setName(name.trim());
+                    return flowRepository.save(flow);
+                })
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
+
     /** Backfill slug if missing so trigger-by-slug works for flows created before slug was required. */
     private Flow ensureSlug(Flow flow) {
         if (flow.getSlug() == null || flow.getSlug().isBlank()) {
@@ -81,9 +102,14 @@ public class FlowController {
     // Save the entire canvas in one shot — Studio sends all nodes + edges together
     @Transactional
     @PostMapping("/{flowId}/canvas")
-    public ResponseEntity<Void> saveCanvas(
+    public ResponseEntity<?> saveCanvas(
             @PathVariable UUID flowId,
             @RequestBody CanvasSaveDto dto) {
+
+        String saveOutputAsError = validateSaveOutputAs(dto.nodes());
+        if (saveOutputAsError != null) {
+            return ResponseEntity.badRequest().body(Map.of("error", saveOutputAsError));
+        }
 
         nodeRepository.deleteAll(nodeRepository.findByFlowId(flowId));
         edgeRepository.deleteAll(edgeRepository.findByFlowId(flowId));
@@ -100,6 +126,31 @@ public class FlowController {
         }
 
         return ResponseEntity.ok().build();
+    }
+
+    private static final Set<String> RESERVED_NEX_KEYS = Set.of("nodes", "trigger", "variables", "loop", "meta", "nex");
+
+    /** Validates saveOutputAs across all nodes: key format, reserved words, uniqueness. Returns error message or null. */
+    private static String validateSaveOutputAs(List<FlowNodeDto> nodes) {
+        if (nodes == null) return null;
+        Set<String> seen = new HashSet<>();
+        for (FlowNodeDto n : nodes) {
+            Object raw = n.config() != null ? n.config().get("saveOutputAs") : null;
+            if (raw == null || raw.toString().isBlank()) continue;
+            String value = raw.toString().trim();
+            String label = n.label() != null ? n.label() : n.id();
+            if (!value.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
+                return "Node '" + label + "' has invalid saveOutputAs value '" + value + "'. Use only letters, numbers, underscores, starting with a letter.";
+            }
+            if (RESERVED_NEX_KEYS.contains(value)) {
+                return "Node '" + label + "' has reserved saveOutputAs value '" + value + "'. Cannot use: nodes, trigger, variables, loop, meta, nex.";
+            }
+            if (seen.contains(value)) {
+                return "Two nodes have the same saveOutputAs value '" + value + "'. Each node must have a unique name.";
+            }
+            seen.add(value);
+        }
+        return null;
     }
 
     @GetMapping("/{flowId}/canvas")

@@ -1,11 +1,13 @@
 package com.nexflow.nexflow_backend.executor;
 
+import com.nexflow.nexflow_backend.model.nco.LoopState;
 import com.nexflow.nexflow_backend.model.nco.NexflowContextObject;
 import com.nexflow.nexflow_backend.model.nco.NodeContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -22,6 +24,11 @@ public class ReferenceResolver {
     // Resolves all {{ref}} expressions in a string against the current NCO.
     // Supports simple expressions: {{variables.a + variables.b}} or {{variables.x - 1}}
     public String resolve(String template, NexflowContextObject nco) {
+        return resolve(template, nco, null);
+    }
+
+    /** Same as resolve(template, nco) but with optional loop context for {{loop.index}} and {{loop.accumulated}}. */
+    public String resolve(String template, NexflowContextObject nco, LoopState loopContext) {
         if (template == null || !template.contains("{{")) return template;
 
         Matcher matcher = REF_PATTERN.matcher(template);
@@ -29,17 +36,18 @@ public class ReferenceResolver {
 
         while (matcher.find()) {
             String path = matcher.group(1).trim();
-            Object value = resolvePathOrExpression(path, nco);
+            Object value = resolvePathOrExpression(path, nco, loopContext);
             if (value == null && (path.startsWith("nodes.") || path.startsWith("variables."))) {
                 log.warn("Reference resolved to null: {{}} — check path and that START output.body is set", path);
             }
+            // Do not log for missing nex keys — optional references, case-sensitive
             matcher.appendReplacement(result, value != null ? value.toString() : "");
         }
         matcher.appendTail(result);
         return result.toString();
     }
 
-    private Object resolvePathOrExpression(String path, NexflowContextObject nco) {
+    private Object resolvePathOrExpression(String path, NexflowContextObject nco, LoopState loopContext) {
         String op = null;
         int opIndex = -1;
         int opLength = 0;
@@ -55,11 +63,11 @@ public class ReferenceResolver {
         if (op != null && opIndex >= 0) {
             String leftStr = path.substring(0, opIndex).trim();
             String rightStr = path.substring(opIndex + opLength).trim();
-            Object left = resolvePath(leftStr, nco);
-            Object right = resolvePath(rightStr, nco);
+            Object left = resolvePath(leftStr, nco, loopContext);
+            Object right = resolvePath(rightStr, nco, loopContext);
             return evaluateOp(op, left, right);
         }
-        return resolvePath(path, nco);
+        return resolvePath(path, nco, loopContext);
     }
 
     private Object evaluateOp(String op, Object left, Object right) {
@@ -103,9 +111,12 @@ public class ReferenceResolver {
     }
 
     // Resolves an entire map of config values — each value can be a {{ref}} or expression.
-    // When the value is a single {{...}} expression, the resolved Object (e.g. Number) is stored
-    // so Mapper output keeps numeric types (e.g. result: 30 instead of "30").
     public Map<String, Object> resolveMap(Map<String, Object> config, NexflowContextObject nco) {
+        return resolveMap(config, nco, null);
+    }
+
+    /** Same as resolveMap(config, nco) but with optional loop context for {{loop.*}}. */
+    public Map<String, Object> resolveMap(Map<String, Object> config, NexflowContextObject nco, LoopState loopContext) {
         if (config == null) return new HashMap<>();
 
         Map<String, Object> resolved = new HashMap<>();
@@ -114,10 +125,10 @@ public class ReferenceResolver {
                 String trimmed = s.trim();
                 if (trimmed.length() >= 5 && trimmed.startsWith("{{") && trimmed.endsWith("}}")) {
                     String inner = trimmed.substring(2, trimmed.length() - 2).trim();
-                    Object obj = resolvePathOrExpression(inner, nco);
+                    Object obj = resolvePathOrExpression(inner, nco, loopContext);
                     resolved.put(key, obj != null ? obj : "");
                 } else {
-                    resolved.put(key, resolve(s, nco));
+                    resolved.put(key, resolve(s, nco, loopContext));
                 }
             } else {
                 resolved.put(key, value);
@@ -127,8 +138,21 @@ public class ReferenceResolver {
     }
 
     @SuppressWarnings("unchecked")
-    private Object resolvePath(String path, NexflowContextObject nco) {
+    private Object resolvePath(String path, NexflowContextObject nco, LoopState loopContext) {
         String[] parts = path.split("\\.");
+        // nex.NAME.field — universal flat container; keys are case-sensitive (e.g. "user" != "User")
+        if (parts[0].equals("nex") && parts.length >= 2) {
+            String remainder = path.substring(4); // strip "nex."
+            return resolveNestedPath(nco.getNex() != null ? nco.getNex() : Map.of(), remainder);
+        }
+
+        if (parts[0].equals("loop") && parts.length >= 2 && loopContext != null) {
+            return switch (parts[1]) {
+                case "index" -> loopContext.getIndex();
+                case "accumulated" -> loopContext.getAccumulated();
+                default -> null;
+            };
+        }
 
         if (parts[0].equals("variables") && parts.length == 2) {
             return nco.getVariable(parts[1]);
@@ -186,5 +210,28 @@ public class ReferenceResolver {
             case "startedAt"   -> nco.getMeta().getStartedAt();
             default            -> null;
         };
+    }
+
+    /** Walk a map/list tree by dot path (e.g. "user.result.userId"). Handles Map, List (integer index), and scalars. Returns null if any step is missing. */
+    @SuppressWarnings("unchecked")
+    private Object resolveNestedPath(Object root, String path) {
+        if (root == null || path == null || path.isBlank()) return null;
+        String[] segments = path.split("\\.");
+        Object current = root;
+        for (int i = 0; i < segments.length; i++) {
+            if (current == null) return null;
+            String seg = segments[i].trim();
+            if (seg.isEmpty()) return null;
+            if (current instanceof Map<?, ?> map) {
+                current = ((Map<String, Object>) map).get(seg);
+            } else if (current instanceof List<?> list && seg.matches("\\d+")) {
+                int idx = Integer.parseInt(seg);
+                if (idx < 0 || idx >= list.size()) return null;
+                current = list.get(idx);
+            } else {
+                return null;
+            }
+        }
+        return current;
     }
 }
