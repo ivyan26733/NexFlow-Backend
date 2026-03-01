@@ -1,5 +1,6 @@
 package com.nexflow.nexflow_backend.model.domain;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import lombok.Data;
 import org.hibernate.annotations.JdbcTypeCode;
@@ -43,10 +44,21 @@ public class NexusConnector {
     @Column(name = "auth_type")
     private String authType = "NONE";
 
-    // Default headers — merged into every NEXUS node that uses this connector
+    // Default headers — merged into every NEXUS node that uses this connector (JSON key "headers" for API)
+    @JsonProperty("headers")
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "default_headers")
     private Map<String, String> defaultHeaders;
+
+    // Optional default request body template for REST (JSON key "body" for API)
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "body")
+    private Map<String, String> body;
+
+    // Optional query params applied to REST requests
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "query_params")
+    private Map<String, String> queryParams;
 
     // Auth credentials stored as JSON (e.g. {"token": "sk_..."} or {"key": "...", "secret": "..."})
     // In production this would be encrypted. For MVP, stored as-is.
