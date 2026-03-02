@@ -57,6 +57,13 @@ public class FlowExecutionEngine {
     public NexflowContextObject execute(UUID flowId, String executionId, Map<String, Object> triggerPayload) {
         NexflowContextObject nco = NexflowContextObject.create(flowId.toString(), executionId);
 
+        log.info(
+                "[FlowExecutionEngine] START executionId={} flowId={} triggerKeys={}",
+                executionId,
+                flowId,
+                triggerPayload != null ? triggerPayload.keySet() : "null"
+        );
+
         List<FlowNode> allNodes = new ArrayList<>(nodeRepository.findByFlowId(flowId));
         List<FlowEdge> allEdges = edgeRepository.findByFlowId(flowId);
 
@@ -84,6 +91,14 @@ public class FlowExecutionEngine {
         while (!queue.isEmpty()) {
             FlowNode current = queue.poll();
             nco.getMeta().setCurrentNodeId(current.getId().toString());
+
+            log.debug(
+                    "[FlowExecutionEngine] Node START executionId={} nodeId={} label={} type={}",
+                    executionId,
+                    current.getId(),
+                    current.getLabel(),
+                    current.getNodeType()
+            );
 
             // Safety: max steps to avoid runaway execution (no process kill, clean exit)
             if (nco.getNodeExecutionOrder().size() >= MAX_NODE_EXECUTIONS) {
@@ -121,6 +136,15 @@ public class FlowExecutionEngine {
                 }
             }
             eventPublisher.nodeCompleted(executionId, current.getId().toString(), result.getStatus(), nco.getNex());
+
+            log.debug(
+                    "[FlowExecutionEngine] Node END executionId={} nodeId={} status={} nexKeys={}",
+                    executionId,
+                    current.getId(),
+                    result.getStatus(),
+                    nco.getNex() != null ? nco.getNex().keySet() : "null"
+            );
+
             nco.getNodeExecutionOrder().add(current.getId().toString());
             executedNodeIds.add(current.getId());
 
@@ -159,6 +183,14 @@ public class FlowExecutionEngine {
         }
 
         finalizeExecution(nco, CheckOutputFlag);
+
+        log.info(
+                "[FlowExecutionEngine] END executionId={} flowId={} status={}",
+                executionId,
+                flowId,
+                nco.getMeta().getStatus()
+        );
+
         return nco;
     }
     

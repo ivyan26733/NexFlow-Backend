@@ -44,6 +44,16 @@ public class FlowService {
         execution.setTriggeredBy(triggeredBy);
         execution = executionRepository.save(execution);
         final UUID executionId = execution.getId();
+
+        log.info(
+                "[FlowService] triggerFlow flowId={} executionId={} triggeredBy={} waitForSubscriber={} payloadKeys={}",
+                flowId,
+                executionId,
+                triggeredBy,
+                waitForSubscriber,
+                payload != null ? payload.keySet() : "null"
+        );
+
         Runnable run = () -> runExecutionInBackground(executionId, flowId, payload);
         if (waitForSubscriber) {
             CompletableFuture.delayedExecutor(1500, java.util.concurrent.TimeUnit.MILLISECONDS, java.util.concurrent.ForkJoinPool.commonPool()).execute(run);
@@ -67,6 +77,15 @@ public class FlowService {
         execution = executionRepository.save(execution);
 
         final UUID executionId = execution.getId();
+
+        log.info(
+                "[FlowService] triggerFlowSync flowId={} executionId={} triggeredBy={} payloadKeys={}",
+                flowId,
+                executionId,
+                triggeredBy,
+                payload != null ? payload.keySet() : "null"
+        );
+
         runExecutionInBackground(executionId, flowId, payload);
         return executionRepository.findById(executionId)
                 .orElseThrow(() -> new IllegalStateException("Execution not found after run: " + executionId));
@@ -76,9 +95,24 @@ public class FlowService {
         Execution execution = executionRepository.findById(executionId)
                 .orElseThrow(() -> new IllegalStateException("Execution not found: " + executionId));
         try {
+            log.info(
+                    "[FlowService] runExecutionInBackground START flowId={} executionId={} triggeredBy={} payloadKeys={}",
+                    flowId,
+                    executionId,
+                    execution.getTriggeredBy(),
+                    payload != null ? payload.keySet() : "null"
+            );
+
             NexflowContextObject nco = engine.execute(flowId, executionId.toString(), payload);
             execution.setStatus(nco.getMeta().getStatus());
             execution.setNcoSnapshot(objectMapper.convertValue(nco, Map.class));
+
+            log.info(
+                    "[FlowService] runExecutionInBackground END flowId={} executionId={} status={}",
+                    flowId,
+                    executionId,
+                    nco.getMeta().getStatus()
+            );
         } catch (Exception ex) {
             String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
             log.error("Flow {} execution failed: {}", flowId, msg, ex);

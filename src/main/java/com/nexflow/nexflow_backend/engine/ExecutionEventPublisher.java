@@ -2,6 +2,7 @@ package com.nexflow.nexflow_backend.engine;
 
 import com.nexflow.nexflow_backend.model.nco.NodeStatus;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Component;
 
@@ -13,6 +14,7 @@ import java.util.Map;
  */
 @Component
 @RequiredArgsConstructor
+@Slf4j
 public class ExecutionEventPublisher {
 
     private static final String TOPIC_PREFIX = "/topic/execution/";
@@ -53,6 +55,22 @@ public class ExecutionEventPublisher {
             payload.put("nex", nex);
         }
         String destination = TOPIC_PREFIX + executionId;
+
+        // Detailed log so we can see exactly what is being published in prod/local.
+        // NOTE: nex can be large, so only log its keys/size rather than full JSON.
+        if (log.isInfoEnabled()) {
+            int nexSize = nex != null ? nex.size() : 0;
+            log.info(
+                "[ExecutionEventPublisher] sending event dest='{}' executionId={} nodeId={} status={} errorPresent={} nexSize={}",
+                destination,
+                executionId,
+                nodeId,
+                status.name(),
+                error != null && !error.isBlank(),
+                nexSize
+            );
+        }
+
         messagingTemplate.convertAndSend(destination, payload);
     }
 }
