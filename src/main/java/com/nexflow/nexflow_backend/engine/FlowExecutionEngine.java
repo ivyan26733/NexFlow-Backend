@@ -298,6 +298,8 @@ public class FlowExecutionEngine {
                 .build();
         nco.setNodeOutput(startNode.getId().toString(), startCtx);
         nco.setNodeAlias("start", startCtx);
+        // Always expose trigger payload under nex.start so input.nex.start.body.* works in Script/Mapper nodes
+        nco.getNex().putIfAbsent("start", output);
         // If START node has "Save output as", put trigger payload in nex so input.nex.start works in child flows
         String saveAs = extractSaveOutputAs(startNode);
         if (saveAs != null && !saveAs.isBlank()) {
