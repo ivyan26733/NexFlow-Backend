@@ -117,8 +117,14 @@ public class ScriptRunner {
                 return ScriptResult.error(errorMsg);
             }
 
-            // Parse the JSON result written by the wrapper
-            Map<String, Object> parsed = objectMapper.readValue(stdout, Map.class);
+            // Script may have printed/logged before the wrapper writes JSON (e.g. console.log(324242)).
+            // Parse only the JSON object: from the first '{' to the end.
+            int jsonStart = stdout.indexOf('{');
+            if (jsonStart == -1) {
+                return ScriptResult.error("Script produced no valid JSON. Output: " + truncate(stdout, 200));
+            }
+            String jsonStr = stdout.substring(jsonStart);
+            Map<String, Object> parsed = objectMapper.readValue(jsonStr, Map.class);
             boolean success = Boolean.TRUE.equals(parsed.get("success"));
 
             if (success) {
@@ -154,6 +160,11 @@ public class ScriptRunner {
             try { Files.deleteIfExists(path); }
             catch (IOException ignored) {}
         }
+    }
+
+    private static String truncate(String s, int maxLen) {
+        if (s == null) return "null";
+        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }
 
     // ── Result type ───────────────────────────────────────────────────────────
