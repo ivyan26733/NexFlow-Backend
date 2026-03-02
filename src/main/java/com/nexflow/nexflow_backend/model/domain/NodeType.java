@@ -12,6 +12,7 @@ public enum NodeType {
     LOOP,      // intentional loop control node
     SUCCESS,
     FAILURE,
+    AI,        // LLM node — uses LlmProviderConfig API keys, returns JSON
 
     // Future nodes
     KAFKA_PRODUCER,

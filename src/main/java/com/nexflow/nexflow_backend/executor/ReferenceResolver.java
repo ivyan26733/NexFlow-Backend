@@ -137,8 +137,29 @@ public class ReferenceResolver {
         return resolved;
     }
 
+    /**
+     * Resolve a path or {{path}} template to an Object (for AI node input bindings etc.).
+     * Never logs or exposes credential paths; use for nex/nodes/variables only.
+     */
+    public Object resolveToObject(String pathOrTemplate, NexflowContextObject nco) {
+        String path = pathOrTemplate;
+        if (path != null && path.contains("{{") && path.contains("}}")) {
+            int start = path.indexOf("{{");
+            int end = path.indexOf("}}", start);
+            if (start >= 0 && end > start) {
+                path = path.substring(start + 2, end).trim();
+            }
+        }
+        if (path == null || path.isBlank()) return null;
+        return resolvePath(path, nco, null);
+    }
+
     @SuppressWarnings("unchecked")
     private Object resolvePath(String path, NexflowContextObject nco, LoopState loopContext) {
+        if (path != null && path.startsWith("input.")) {
+            path = path.substring(6).trim();
+        }
+        if (path == null || path.isBlank()) return null;
         String[] parts = path.split("\\.");
         // nex.NAME.field — universal flat container; keys are case-sensitive (e.g. "user" != "User")
         if (parts[0].equals("nex") && parts.length >= 2) {

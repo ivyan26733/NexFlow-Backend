@@ -37,6 +37,15 @@ import java.util.*;
 @RequiredArgsConstructor
 public class NexusExecutor implements NodeExecutor {
 
+    /** Short driver names from Nexus UI (e.g. "postgresql") → JDBC Driver class name for Class.forName(). */
+    private static final Map<String, String> JDBC_DRIVER_CLASSES = Map.of(
+        "postgresql", "org.postgresql.Driver",
+        "mysql",      "com.mysql.cj.jdbc.Driver",
+        "mariadb",    "org.mariadb.jdbc.Driver",
+        "oracle",     "oracle.jdbc.OracleDriver",
+        "sqlserver",  "com.microsoft.sqlserver.jdbc.SQLServerDriver"
+    );
+
     private final NexusConnectorRepository connectorRepository;
     private final ReferenceResolver        resolver;
     private final RestTemplate             restTemplate;
@@ -52,6 +61,7 @@ public class NexusExecutor implements NodeExecutor {
      * 1) Inline HTTP: no connectorId; config has url, method, headers, body (same shape as legacy HTTP Call node).
      * 2) Connector: connectorId set → load NexusConnector and run REST or JDBC.
      */
+
     @Override
     @SuppressWarnings("unchecked")
     public NodeContext execute(FlowNode node, NexflowContextObject nco) {
@@ -202,12 +212,15 @@ public class NexusExecutor implements NodeExecutor {
             return failureContext(nodeId, Map.of("query", rawQuery), "NEXUS JDBC node has no query configured");
         }
 
-        // Load driver class if specified (driver jar must be on the classpath)
-        if (connector.getJdbcDriver() != null && !connector.getJdbcDriver().isBlank()) {
-            try { Class.forName(connector.getJdbcDriver()); }
-            catch (ClassNotFoundException ex) {
+        // Load driver class (Nexus UI stores short name e.g. "postgresql" → map to org.postgresql.Driver)
+        String driverKey = connector.getJdbcDriver() != null ? connector.getJdbcDriver().trim() : null;
+        if (driverKey != null && !driverKey.isBlank()) {
+            String driverClass = JDBC_DRIVER_CLASSES.getOrDefault(driverKey.toLowerCase(Locale.ROOT), driverKey);
+            try {
+                Class.forName(driverClass);
+            } catch (ClassNotFoundException ex) {
                 return failureContext(nodeId, Map.of("query", query),
-                        "JDBC driver not found on classpath: " + connector.getJdbcDriver()
+                        "JDBC driver not found on classpath: " + driverClass
                         + ". Add the driver dependency to pom.xml.");
             }
         }
