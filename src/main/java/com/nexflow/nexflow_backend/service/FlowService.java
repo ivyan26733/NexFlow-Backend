@@ -56,7 +56,10 @@ public class FlowService {
 
         Runnable run = () -> runExecutionInBackground(executionId, flowId, payload);
         if (waitForSubscriber) {
-            CompletableFuture.delayedExecutor(1500, java.util.concurrent.TimeUnit.MILLISECONDS, java.util.concurrent.ForkJoinPool.commonPool()).execute(run);
+            // Small intentional delay so Studio can establish WS subscription before events are published.
+            CompletableFuture
+                    .delayedExecutor(3000, java.util.concurrent.TimeUnit.MILLISECONDS, java.util.concurrent.ForkJoinPool.commonPool())
+                    .execute(run);
         } else {
             CompletableFuture.runAsync(run);
         }
