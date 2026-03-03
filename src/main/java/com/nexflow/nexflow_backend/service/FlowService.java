@@ -43,7 +43,8 @@ public class FlowService {
         execution.setTriggeredBy(triggeredBy);
         execution.setStatus(ExecutionStatus.PENDING);
         execution.setTriggerPayload(payload);
-        execution.setStartedAt(null);
+        // Keep startedAt non-null to match existing schema expectations; PENDING means "not yet running".
+        execution.setStartedAt(Instant.now());
         execution.setCompletedAt(null);
         execution = executionRepository.save(execution);
 
