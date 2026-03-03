@@ -51,8 +51,9 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
                     .setSystemHeartbeatSendInterval(10_000)
                     .setSystemHeartbeatReceiveInterval(10_000);
         } else {
-            registry.enableSimpleBroker("/topic", "/queue")
-                    .setHeartbeatValue(new long[]{10_000, 10_000});
+            // For the in-memory simple broker we don't need explicit heartbeats.
+            // Avoid configuring them to prevent requiring a TaskScheduler in tests.
+            registry.enableSimpleBroker("/topic", "/queue");
         }
     }
 }
