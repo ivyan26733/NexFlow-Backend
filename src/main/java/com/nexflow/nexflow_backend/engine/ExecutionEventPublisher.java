@@ -17,7 +17,7 @@ import java.util.Map;
 @Slf4j
 public class ExecutionEventPublisher {
 
-    private static final String TOPIC_PREFIX = "/topic/execution/";
+    private static final String TOPIC_PREFIX = "/topic/execution.";
 
     private final SimpMessagingTemplate messagingTemplate;
 
