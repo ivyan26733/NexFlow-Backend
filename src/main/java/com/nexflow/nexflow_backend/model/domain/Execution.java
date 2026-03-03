@@ -23,10 +23,15 @@ public class Execution {
     private UUID flowId;
 
     @Enumerated(EnumType.STRING)
-    private ExecutionStatus status = ExecutionStatus.RUNNING;
+    private ExecutionStatus status = ExecutionStatus.PENDING;
 
     @Column(name = "triggered_by")
     private String triggeredBy; // PULSE, MANUAL, SCHEDULE
+
+    // Original trigger payload for this execution (stored so execution can be started later)
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "trigger_payload")
+    private Map<String, Object> triggerPayload;
 
     // Full NCO snapshot saved at the end of execution for audit/debug
     @JdbcTypeCode(SqlTypes.JSON)
@@ -34,7 +39,7 @@ public class Execution {
     private Map<String, Object> ncoSnapshot;
 
     @Column(name = "started_at")
-    private Instant startedAt = Instant.now();
+    private Instant startedAt;
 
     @Column(name = "completed_at")
     private Instant completedAt;

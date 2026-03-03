@@ -4,7 +4,9 @@ import com.nexflow.nexflow_backend.model.domain.Execution;
 import com.nexflow.nexflow_backend.model.domain.Flow;
 import com.nexflow.nexflow_backend.repository.ExecutionRepository;
 import com.nexflow.nexflow_backend.repository.FlowRepository;
+import com.nexflow.nexflow_backend.service.FlowService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -17,10 +19,12 @@ import java.util.stream.Collectors;
 @RestController
 @RequestMapping("/api/executions")
 @RequiredArgsConstructor
+@Slf4j
 public class ExecutionController {
 
     private final ExecutionRepository executionRepository;
     private final FlowRepository      flowRepository;
+    private final FlowService         flowService;
 
     // GET /api/executions — full history across all flows, newest first
     @GetMapping
@@ -69,6 +73,21 @@ public class ExecutionController {
                     ));
                 })
                 .orElse(ResponseEntity.notFound().build());
+    }
+
+    /**
+     * POST /api/executions/{executionId}/start
+     *
+     * Called by the frontend AFTER it has confirmed its STOMP subscription
+     * to /queue/execution.{executionId}.
+     *
+     * Returns 202 Accepted immediately. Execution runs in background.
+     */
+    @PostMapping("/{executionId}/start")
+    public ResponseEntity<Void> startExecution(@PathVariable UUID executionId) {
+        log.info("[ExecutionController] start requested for executionId={}", executionId);
+        flowService.startExecution(executionId);
+        return ResponseEntity.accepted().build();
     }
 
     // ── DTOs ─────────────────────────────────────────────────────────────────

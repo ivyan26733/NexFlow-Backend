@@ -30,40 +30,60 @@ public class FlowService {
     private final ObjectMapper objectMapper;
 
     /**
-     * Triggers a flow and returns immediately with the execution (status RUNNING).
-     * The actual execution runs in the background so the frontend can subscribe to
-     * WebSocket events before they are sent. Used by Pulse API (Studio Trigger).
-     * @param waitForSubscriber when true, delays execution start by 1.5s so Studio can connect/subscribe first
+     * Phase 1: Create the execution record and persist the trigger payload.
+     * Does NOT start the flow engine. The caller must invoke startExecution()
+     * when it is ready for the execution to begin.
      */
-    public Execution triggerFlow(UUID flowId, Map<String, Object> payload, String triggeredBy, boolean waitForSubscriber) {
+    public Execution prepareExecution(UUID flowId, Map<String, Object> payload, String triggeredBy) {
         flowRepository.findById(flowId)
                 .orElseThrow(() -> new IllegalArgumentException("Flow not found: " + flowId));
 
         Execution execution = new Execution();
         execution.setFlowId(flowId);
         execution.setTriggeredBy(triggeredBy);
+        execution.setStatus(ExecutionStatus.PENDING);
+        execution.setTriggerPayload(payload);
+        execution.setStartedAt(null);
+        execution.setCompletedAt(null);
         execution = executionRepository.save(execution);
-        final UUID executionId = execution.getId();
 
         log.info(
-                "[FlowService] triggerFlow flowId={} executionId={} triggeredBy={} waitForSubscriber={} payloadKeys={}",
+                "[FlowService] prepareExecution flowId={} executionId={} triggeredBy={} payloadKeys={}",
                 flowId,
-                executionId,
+                execution.getId(),
                 triggeredBy,
-                waitForSubscriber,
                 payload != null ? payload.keySet() : "null"
         );
 
-        Runnable run = () -> runExecutionInBackground(executionId, flowId, payload);
-        if (waitForSubscriber) {
-            // Small intentional delay so Studio can establish WS subscription before events are published.
-            CompletableFuture
-                    .delayedExecutor(3000, java.util.concurrent.TimeUnit.MILLISECONDS, java.util.concurrent.ForkJoinPool.commonPool())
-                    .execute(run);
-        } else {
-            CompletableFuture.runAsync(run);
-        }
         return execution;
+    }
+
+    /**
+     * Phase 2: Start a previously prepared execution asynchronously.
+     * Used by Studio after the WebSocket subscription is ready.
+     */
+    public void startExecution(UUID executionId) {
+        Execution execution = executionRepository.findById(executionId)
+                .orElseThrow(() -> new IllegalArgumentException("Execution not found: " + executionId));
+
+        if (execution.getStatus() != ExecutionStatus.PENDING) {
+            throw new IllegalStateException(
+                    "Execution " + executionId + " is not in PENDING state: " + execution.getStatus());
+        }
+
+        execution.setStatus(ExecutionStatus.RUNNING);
+        execution.setStartedAt(Instant.now());
+        executionRepository.save(execution);
+
+        log.info(
+                "[FlowService] startExecution executionId={} flowId={}",
+                executionId,
+                execution.getFlowId()
+        );
+
+        CompletableFuture.runAsync(() ->
+                runExecutionInBackground(executionId, execution.getFlowId())
+        );
     }
 
     /**
@@ -71,15 +91,12 @@ public class FlowService {
      * Used by SubFlowExecutor in SYNC mode.
      */
     public Execution triggerFlowSync(UUID flowId, Map<String, Object> payload, String triggeredBy) {
-        flowRepository.findById(flowId)
-                .orElseThrow(() -> new IllegalArgumentException("Flow not found: " + flowId));
-
-        Execution execution = new Execution();
-        execution.setFlowId(flowId);
-        execution.setTriggeredBy(triggeredBy);
-        execution = executionRepository.save(execution);
-
+        Execution execution = prepareExecution(flowId, payload, triggeredBy);
         final UUID executionId = execution.getId();
+
+        execution.setStatus(ExecutionStatus.RUNNING);
+        execution.setStartedAt(Instant.now());
+        executionRepository.save(execution);
 
         log.info(
                 "[FlowService] triggerFlowSync flowId={} executionId={} triggeredBy={} payloadKeys={}",
@@ -89,12 +106,12 @@ public class FlowService {
                 payload != null ? payload.keySet() : "null"
         );
 
-        runExecutionInBackground(executionId, flowId, payload);
+        runExecutionInBackground(executionId, flowId);
         return executionRepository.findById(executionId)
                 .orElseThrow(() -> new IllegalStateException("Execution not found after run: " + executionId));
     }
 
-    private void runExecutionInBackground(UUID executionId, UUID flowId, Map<String, Object> payload) {
+    private void runExecutionInBackground(UUID executionId, UUID flowId) {
         Execution execution = executionRepository.findById(executionId)
                 .orElseThrow(() -> new IllegalStateException("Execution not found: " + executionId));
         try {
@@ -103,8 +120,11 @@ public class FlowService {
                     flowId,
                     executionId,
                     execution.getTriggeredBy(),
-                    payload != null ? payload.keySet() : "null"
+                    execution.getTriggerPayload() != null ? execution.getTriggerPayload().keySet() : "null"
             );
+
+            Map<String, Object> payload =
+                    execution.getTriggerPayload() != null ? execution.getTriggerPayload() : Map.of();
 
             NexflowContextObject nco = engine.execute(flowId, executionId.toString(), payload);
             execution.setStatus(nco.getMeta().getStatus());
@@ -136,8 +156,18 @@ public class FlowService {
     /**
      * Convenience overload — keeps PulseController call-site clean.
      */
+    /**
+     * Convenience method for internal callers that don't need the two-phase
+     * Studio pattern. Creates the execution and starts it asynchronously.
+     */
+    public Execution triggerFlow(UUID flowId, Map<String, Object> payload, String triggeredBy) {
+        Execution execution = prepareExecution(flowId, payload, triggeredBy);
+        startExecution(execution.getId());
+        return execution;
+    }
+
     public Execution triggerFlow(UUID flowId, Map<String, Object> payload) {
-        return triggerFlow(flowId, payload, "PULSE", false);
+        return triggerFlow(flowId, payload, "PULSE");
     }
 
     /**

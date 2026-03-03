@@ -23,13 +23,19 @@ public class PulseController {
     @PostMapping("/{slugOrId}")
     public ResponseEntity<Execution> trigger(
             @PathVariable String slugOrId,
-            @RequestBody(required = false) Map<String, Object> payload,
-            @RequestHeader(value = "X-Wait-For-Subscriber", required = false) String waitForSubscriber) {
+            @RequestBody(required = false) Map<String, Object> payload) {
 
         UUID flowId = resolveFlowId(slugOrId);
-        boolean delayStart = "1".equals(waitForSubscriber);
-        Execution result = flowService.triggerFlow(flowId, payload != null ? payload : Map.of(), "PULSE", delayStart);
-        return ResponseEntity.ok(result);
+
+        // Phase 1 only — create record, return ID, do NOT start execution.
+        // Frontend (Studio / Pulses page) will subscribe, then call POST /api/executions/{id}/start.
+        Execution execution = flowService.prepareExecution(
+                flowId,
+                payload != null ? payload : Map.of(),
+                "PULSE"
+        );
+
+        return ResponseEntity.ok(execution);
     }
 
     private UUID resolveFlowId(String slugOrId) {

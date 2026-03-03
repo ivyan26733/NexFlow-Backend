@@ -8,16 +8,12 @@ import org.springframework.stereotype.Component;
 
 import java.util.Map;
 
-/**
- * Publishes node execution events to WebSocket subscribers via the in-memory broker.
- * Studio subscribes to /topic/execution/{executionId} to show live node status.
- */
 @Component
 @RequiredArgsConstructor
 @Slf4j
 public class ExecutionEventPublisher {
 
-    private static final String TOPIC_PREFIX = "/topic/execution.";
+    private static final String TOPIC_PREFIX = "/queue/execution.";
 
     private final SimpMessagingTemplate messagingTemplate;
 
