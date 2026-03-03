@@ -33,6 +33,10 @@ public class FlowService {
      * Phase 1: Create the execution record and persist the trigger payload.
      * Does NOT start the flow engine. The caller must invoke startExecution()
      * when it is ready for the execution to begin.
+     *
+     * NOTE: For backward compatibility with the existing database constraint on
+     * executions.status, we keep the initial status as RUNNING. The actual
+     * engine work will still be deferred until startExecution is called.
      */
     public Execution prepareExecution(UUID flowId, Map<String, Object> payload, String triggeredBy) {
         flowRepository.findById(flowId)
@@ -41,10 +45,7 @@ public class FlowService {
         Execution execution = new Execution();
         execution.setFlowId(flowId);
         execution.setTriggeredBy(triggeredBy);
-        execution.setStatus(ExecutionStatus.PENDING);
-        execution.setTriggerPayload(payload);
-        // Keep startedAt non-null to match existing schema expectations; PENDING means "not yet running".
-        execution.setStartedAt(Instant.now());
+        execution.setStatus(ExecutionStatus.RUNNING);
         execution.setCompletedAt(null);
         execution = executionRepository.save(execution);
 
@@ -56,6 +57,11 @@ public class FlowService {
                 payload != null ? payload.keySet() : "null"
         );
 
+        // Store the original payload in the NCO snapshot later; for now, pass it directly
+        // to the engine when the execution actually starts.
+
+        // We don't persist the payload separately to avoid schema changes in production.
+
         return execution;
     }
 
@@ -63,18 +69,9 @@ public class FlowService {
      * Phase 2: Start a previously prepared execution asynchronously.
      * Used by Studio after the WebSocket subscription is ready.
      */
-    public void startExecution(UUID executionId) {
+    public void startExecution(UUID executionId, Map<String, Object> payload) {
         Execution execution = executionRepository.findById(executionId)
                 .orElseThrow(() -> new IllegalArgumentException("Execution not found: " + executionId));
-
-        if (execution.getStatus() != ExecutionStatus.PENDING) {
-            throw new IllegalStateException(
-                    "Execution " + executionId + " is not in PENDING state: " + execution.getStatus());
-        }
-
-        execution.setStatus(ExecutionStatus.RUNNING);
-        execution.setStartedAt(Instant.now());
-        executionRepository.save(execution);
 
         log.info(
                 "[FlowService] startExecution executionId={} flowId={}",
@@ -83,7 +80,7 @@ public class FlowService {
         );
 
         CompletableFuture.runAsync(() ->
-                runExecutionInBackground(executionId, execution.getFlowId())
+                runExecutionInBackground(executionId, execution.getFlowId(), payload)
         );
     }
 
@@ -92,12 +89,15 @@ public class FlowService {
      * Used by SubFlowExecutor in SYNC mode.
      */
     public Execution triggerFlowSync(UUID flowId, Map<String, Object> payload, String triggeredBy) {
-        Execution execution = prepareExecution(flowId, payload, triggeredBy);
-        final UUID executionId = execution.getId();
+        flowRepository.findById(flowId)
+                .orElseThrow(() -> new IllegalArgumentException("Flow not found: " + flowId));
 
-        execution.setStatus(ExecutionStatus.RUNNING);
-        execution.setStartedAt(Instant.now());
-        executionRepository.save(execution);
+        Execution execution = new Execution();
+        execution.setFlowId(flowId);
+        execution.setTriggeredBy(triggeredBy);
+        execution = executionRepository.save(execution);
+
+        final UUID executionId = execution.getId();
 
         log.info(
                 "[FlowService] triggerFlowSync flowId={} executionId={} triggeredBy={} payloadKeys={}",
@@ -107,12 +107,12 @@ public class FlowService {
                 payload != null ? payload.keySet() : "null"
         );
 
-        runExecutionInBackground(executionId, flowId);
+        runExecutionInBackground(executionId, flowId, payload);
         return executionRepository.findById(executionId)
                 .orElseThrow(() -> new IllegalStateException("Execution not found after run: " + executionId));
     }
 
-    private void runExecutionInBackground(UUID executionId, UUID flowId) {
+    private void runExecutionInBackground(UUID executionId, UUID flowId, Map<String, Object> payload) {
         Execution execution = executionRepository.findById(executionId)
                 .orElseThrow(() -> new IllegalStateException("Execution not found: " + executionId));
         try {
@@ -121,11 +121,8 @@ public class FlowService {
                     flowId,
                     executionId,
                     execution.getTriggeredBy(),
-                    execution.getTriggerPayload() != null ? execution.getTriggerPayload().keySet() : "null"
+                    payload != null ? payload.keySet() : "null"
             );
-
-            Map<String, Object> payload =
-                    execution.getTriggerPayload() != null ? execution.getTriggerPayload() : Map.of();
 
             NexflowContextObject nco = engine.execute(flowId, executionId.toString(), payload);
             execution.setStatus(nco.getMeta().getStatus());
@@ -162,8 +159,7 @@ public class FlowService {
      * Studio pattern. Creates the execution and starts it asynchronously.
      */
     public Execution triggerFlow(UUID flowId, Map<String, Object> payload, String triggeredBy) {
-        Execution execution = prepareExecution(flowId, payload, triggeredBy);
-        startExecution(execution.getId());
+        Execution execution = triggerFlowSync(flowId, payload, triggeredBy);
         return execution;
     }
 
