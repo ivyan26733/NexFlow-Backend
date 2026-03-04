@@ -233,26 +233,72 @@ public class ReferenceResolver {
         };
     }
 
-    /** Walk a map/list tree by dot path (e.g. "user.result.userId"). Handles Map, List (integer index), and scalars. Returns null if any step is missing. */
+    // Matches a path segment that may carry a bracket index:
+    //   "name"     → key="name",  index=null
+    //   "items[0]" → key="items", index="0"
+    //   "tags[12]" → key="tags",  index="12"
+    private static final java.util.regex.Pattern BRACKET =
+            java.util.regex.Pattern.compile("^([^\\[]+)(?:\\[(\\d+)\\])?$");
+
+    /**
+     * Walk a map/list tree by dot path (e.g. "user.result.userId").
+     * Handles:
+     * - Map lookups by key
+     * - List lookups by numeric segment (legacy ".0" style)
+     * - Bracket index notation "key[n]" for Lists stored under a Map key
+     *
+     * Returns null if any step is missing or incompatible with the expected structure.
+     */
     @SuppressWarnings("unchecked")
     private Object resolveNestedPath(Object root, String path) {
         if (root == null || path == null || path.isBlank()) return null;
         String[] segments = path.split("\\.");
         Object current = root;
-        for (int i = 0; i < segments.length; i++) {
+
+        for (String segment : segments) {
             if (current == null) return null;
-            String seg = segments[i].trim();
+            String seg = segment != null ? segment.trim() : "";
             if (seg.isEmpty()) return null;
+
+            java.util.regex.Matcher m = BRACKET.matcher(seg);
+            if (!m.matches()) {
+                // Segment does not match "key" or "key[n]" — cannot resolve further
+                return null;
+            }
+
+            String key    = m.group(1);   // map key or legacy numeric index
+            String idxStr = m.group(2);   // optional [n] index
+
+            // Step 1 — resolve the key from the current Map/List
             if (current instanceof Map<?, ?> map) {
-                current = ((Map<String, Object>) map).get(seg);
-            } else if (current instanceof List<?> list && seg.matches("\\d+")) {
-                int idx = Integer.parseInt(seg);
+                current = ((Map<String, Object>) map).get(key);
+            } else if (current instanceof List<?> list && key.matches("\\d+")) {
+                // Legacy ".0" dot-numeric style for lists
+                int idx = Integer.parseInt(key);
                 if (idx < 0 || idx >= list.size()) return null;
                 current = list.get(idx);
             } else {
                 return null;
             }
+
+            // Step 2 — if bracket index present, apply it against the resulting List
+            if (idxStr != null) {
+                if (current == null) return null;
+                int idx = Integer.parseInt(idxStr);
+
+                if (current instanceof List<?> list) {
+                    if (idx < 0 || idx >= list.size()) {
+                        // Out-of-bounds index — treat as missing
+                        return null;
+                    }
+                    current = list.get(idx);
+                } else {
+                    // Bracket used on non-List value — invalid structure
+                    return null;
+                }
+            }
         }
+
         return current;
     }
 }
