@@ -9,8 +9,9 @@ import com.nexflow.nexflow_backend.repository.ExecutionRepository;
 import com.nexflow.nexflow_backend.repository.FlowRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Async;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -18,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 
 @Slf4j
 @Service
@@ -28,6 +30,8 @@ public class FlowService {
     private final FlowRepository flowRepository;
     private final ExecutionRepository executionRepository;
     private final ObjectMapper objectMapper;
+    @Qualifier("flowExecutionExecutor")
+    private final Executor flowExecutionExecutor;
 
     /**
      * Phase 1: Create the execution record and persist the trigger payload.
@@ -46,6 +50,7 @@ public class FlowService {
         execution.setFlowId(flowId);
         execution.setTriggeredBy(triggeredBy);
         execution.setStatus(ExecutionStatus.RUNNING);
+        execution.setPayload(payload);
         execution.setCompletedAt(null);
         execution = executionRepository.save(execution);
 
@@ -69,6 +74,14 @@ public class FlowService {
      * Phase 2: Start a previously prepared execution asynchronously.
      * Used by Studio after the WebSocket subscription is ready.
      */
+    public void startExecution(UUID executionId) {
+        startExecution(executionId, Map.of());
+    }
+
+    /**
+     * Phase 2: Start a previously prepared execution asynchronously.
+     * Used by Studio after the WebSocket subscription is ready.
+     */
     public void startExecution(UUID executionId, Map<String, Object> payload) {
         Execution execution = executionRepository.findById(executionId)
                 .orElseThrow(() -> new IllegalArgumentException("Execution not found: " + executionId));
@@ -79,9 +92,31 @@ public class FlowService {
                 execution.getFlowId()
         );
 
+        logPoolStats();
+
+        Map<String, Object> effectivePayload = execution.getPayload() != null
+                ? execution.getPayload()
+                : (payload != null ? payload : Map.of());
+
         CompletableFuture.runAsync(() ->
-                runExecutionInBackground(executionId, execution.getFlowId(), payload)
+                runExecutionInBackground(executionId, execution.getFlowId(), effectivePayload),
+                flowExecutionExecutor
         );
+    }
+
+    /**
+     * Single-phase execution: prepare + start in one call.
+     * Used by external callers (webhooks, API, JMeter, scheduled pulses)
+     * that do not have a browser WebSocket waiting to subscribe.
+     */
+    public Execution prepareAndStartExecution(UUID flowId,
+                                              Map<String, Object> payload,
+                                              String triggeredBy) {
+        Execution execution = prepareExecution(flowId, payload, triggeredBy);
+        startExecution(execution.getId(), payload);
+        log.info("[FlowService] prepareAndStartExecution complete flowId={} executionId={} triggeredBy={}",
+                flowId, execution.getId(), triggeredBy);
+        return execution;
     }
 
     /**
@@ -95,6 +130,7 @@ public class FlowService {
         Execution execution = new Execution();
         execution.setFlowId(flowId);
         execution.setTriggeredBy(triggeredBy);
+        execution.setPayload(payload);
         execution = executionRepository.save(execution);
 
         final UUID executionId = execution.getId();
@@ -138,10 +174,17 @@ public class FlowService {
             String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
             log.error("Flow {} execution failed: {}", flowId, msg, ex);
             execution.setStatus(ExecutionStatus.FAILURE);
-            // Persist minimal snapshot so Transactions detail can show the error instead of "No node logs"
+            execution.setErrorMessage(msg);
+            // Persist snapshot so transaction is always created and detail page can show error for debugging
+            Map<String, Object> meta = new java.util.LinkedHashMap<>();
+            meta.put("flowId", flowId.toString());
+            meta.put("executionId", executionId.toString());
+            meta.put("status", ExecutionStatus.FAILURE.name());
+            meta.put("completedAt", Instant.now().toString());
             execution.setNcoSnapshot(Map.of(
                     "nodes", Map.of(),
                     "nodeExecutionOrder", List.of(),
+                    "meta", meta,
                     "error", msg
             ));
         }
@@ -184,6 +227,16 @@ public class FlowService {
         } catch (Exception ex) {
             String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
             log.error("Async flow {} failed: {}", flowId, msg, ex);
+        }
+    }
+
+    private void logPoolStats() {
+        if (flowExecutionExecutor instanceof ThreadPoolTaskExecutor exec) {
+            log.info("[FlowService] threadPool active={} queued={} poolSize={} maxPool={}",
+                    exec.getActiveCount(),
+                    exec.getThreadPoolExecutor().getQueue().size(),
+                    exec.getPoolSize(),
+                    exec.getMaxPoolSize());
         }
     }
 }

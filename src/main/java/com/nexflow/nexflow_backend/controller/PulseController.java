@@ -19,23 +19,38 @@ public class PulseController {
     private final FlowService flowService;
     private final FlowRepository flowRepository;
 
-    /** POST /api/pulse/{slugOrId} — trigger by slug (e.g. flow-abc123) or by flow UUID. */
+    /**
+     * Trigger a flow execution.
+     *
+     * Two modes controlled by X-Studio-Trigger header:
+     *
+     * MODE A — Studio browser trigger (X-Studio-Trigger: 1)
+     *   Phase 1 only: creates execution record, returns executionId.
+     *   Does NOT start execution.
+     *
+     * MODE B — External trigger (no header, default)
+     *   Prepare + start immediately in one shot.
+     *   Used by: JMeter, curl, webhooks, scheduled pulses, API consumers.
+     */
     @PostMapping("/{slugOrId}")
     public ResponseEntity<Execution> trigger(
             @PathVariable String slugOrId,
-            @RequestBody(required = false) Map<String, Object> payload) {
+            @RequestBody(required = false) Map<String, Object> payload,
+            @RequestHeader(value = "X-Studio-Trigger", required = false) String studioTrigger) {
 
         UUID flowId = resolveFlowId(slugOrId);
+        Map<String, Object> safePayload = payload != null ? payload : Map.of();
+        boolean isStudioTrigger = "1".equals(studioTrigger);
 
-        // Phase 1 only — create record, return ID, do NOT start execution.
-        // Frontend (Studio / Pulses page) will subscribe, then call POST /api/executions/{id}/start.
-        Execution execution = flowService.prepareExecution(
-                flowId,
-                payload != null ? payload : Map.of(),
-                "PULSE"
-        );
-
-        return ResponseEntity.ok(execution);
+        if (isStudioTrigger) {
+            // MODE A: two-phase — Studio will call /api/executions/{id}/start later
+            Execution execution = flowService.prepareExecution(flowId, safePayload, "PULSE");
+            return ResponseEntity.ok(execution);
+        } else {
+            // MODE B: single-phase — external callers, start immediately
+            Execution execution = flowService.prepareAndStartExecution(flowId, safePayload, "PULSE");
+            return ResponseEntity.ok(execution);
+        }
     }
 
     private UUID resolveFlowId(String slugOrId) {

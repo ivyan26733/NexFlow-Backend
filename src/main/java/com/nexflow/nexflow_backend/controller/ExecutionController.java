@@ -84,11 +84,9 @@ public class ExecutionController {
      * Returns 202 Accepted immediately. Execution runs in background.
      */
     @PostMapping("/{executionId}/start")
-    public ResponseEntity<Void> startExecution(
-            @PathVariable UUID executionId,
-            @RequestBody(required = false) Map<String, Object> payload) {
+    public ResponseEntity<Void> startExecution(@PathVariable UUID executionId) {
         log.info("[ExecutionController] start requested for executionId={}", executionId);
-        flowService.startExecution(executionId, payload != null ? payload : Map.of());
+        flowService.startExecution(executionId);
         return ResponseEntity.accepted().build();
     }
 

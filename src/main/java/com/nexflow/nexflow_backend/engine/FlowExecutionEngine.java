@@ -111,31 +111,45 @@ public class FlowExecutionEngine {
             }
 
             eventPublisher.nodeStarted(executionId, current.getId().toString());
-            NodeContext result = runNode(current, nco, executionId);
-            // Do not overwrite START node output (set in injectTriggerPayload with output.body)
-            if (!current.getId().equals(startNode.getId())) {
-                nco.setNodeOutput(current.getId().toString(), result);
-                nco.setNodeAlias(toLabelKey(current.getLabel()), result);
-                // Check if this node wants to save output into nex (skip VARIABLE/LOOP — they handle nex themselves where needed)
-                if (current.getNodeType() != NodeType.VARIABLE && current.getNodeType() != NodeType.LOOP) {
-                    String saveAs = extractSaveOutputAs(current);
-                    if (saveAs != null && !saveAs.isBlank()) {
-                        String key = saveAs.trim();
-                        if (key.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
-                            Object valueForNex = result.getSuccessOutput() != null ? result.getSuccessOutput() : result.getOutput();
-                            if (valueForNex != null) {
-                                if (nco.getNex().containsKey(key)) {
-                                    log.warn("saveOutputAs '{}' on node '{}' overwrites existing nex entry from an earlier node.", key, current.getLabel());
+            NodeContext result;
+            try {
+                result = runNode(current, nco, executionId);
+                // Do not overwrite START node output (set in injectTriggerPayload with output.body)
+                if (!current.getId().equals(startNode.getId())) {
+                    nco.setNodeOutput(current.getId().toString(), result);
+                    nco.setNodeAlias(toLabelKey(current.getLabel()), result);
+                    // Check if this node wants to save output into nex (skip VARIABLE/LOOP — they handle nex themselves where needed)
+                    if (current.getNodeType() != NodeType.VARIABLE && current.getNodeType() != NodeType.LOOP) {
+                        String saveAs = extractSaveOutputAs(current);
+                        if (saveAs != null && !saveAs.isBlank()) {
+                            String key = saveAs.trim();
+                            if (key.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
+                                Object valueForNex = result.getSuccessOutput() != null ? result.getSuccessOutput() : result.getOutput();
+                                if (valueForNex != null) {
+                                    if (nco.getNex().containsKey(key)) {
+                                        log.warn("saveOutputAs '{}' on node '{}' overwrites existing nex entry from an earlier node.", key, current.getLabel());
+                                    }
+                                    nco.getNex().put(key, valueForNex);
                                 }
-                                nco.getNex().put(key, valueForNex);
+                            } else {
+                                log.warn("saveOutputAs value '{}' on node '{}' is not a valid key. Only letters, numbers, underscore allowed. Skipping.", key, current.getLabel());
                             }
-                        } else {
-                            log.warn("saveOutputAs value '{}' on node '{}' is not a valid key. Only letters, numbers, underscore allowed. Skipping.", key, current.getLabel());
                         }
                     }
                 }
+                eventPublisher.nodeCompleted(executionId, current.getId().toString(), result.getStatus(), nco.getNex());
+            } catch (Throwable t) {
+                String errMsg = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
+                log.error("Node {} did not complete normally: {}", current.getId(), errMsg, t);
+                eventPublisher.nodeError(executionId, current.getId().toString(), errMsg);
+                result = NodeContext.builder()
+                        .nodeId(current.getId().toString())
+                        .nodeType(current.getNodeType().name())
+                        .status(NodeStatus.FAILURE)
+                        .errorMessage(errMsg)
+                        .build();
+                nco.setNodeOutput(current.getId().toString(), result);
             }
-            eventPublisher.nodeCompleted(executionId, current.getId().toString(), result.getStatus(), nco.getNex());
 
             log.debug(
                     "[FlowExecutionEngine] Node END executionId={} nodeId={} status={} nexKeys={}",
@@ -256,7 +270,6 @@ public class FlowExecutionEngine {
         }
     }
 
-    @SuppressWarnings("unchecked")
     private RetryConfig extractRetryConfig(FlowNode flowNode) {
         Map<String, Object> cfg = flowNode.getConfig();
         if (cfg == null || !cfg.containsKey("retry")) {
