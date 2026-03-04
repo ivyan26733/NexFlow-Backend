@@ -17,8 +17,10 @@ import org.springframework.stereotype.Service;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 
 @Slf4j
@@ -32,6 +34,13 @@ public class FlowService {
     private final ObjectMapper objectMapper;
     @Qualifier("flowExecutionExecutor")
     private final Executor flowExecutionExecutor;
+
+    /**
+     * Tracks which executionIds have an active background thread.
+     * Prevents the same execution from being launched twice when
+     * multiple callers race to invoke startExecution().
+     */
+    private final Set<UUID> activeExecutions = ConcurrentHashMap.newKeySet();
 
     /**
      * Phase 1: Create the execution record and persist the trigger payload.
@@ -83,6 +92,15 @@ public class FlowService {
      * Used by Studio after the WebSocket subscription is ready.
      */
     public void startExecution(UUID executionId, Map<String, Object> payload) {
+        logPoolStats();
+
+        // Guard against double-start: if a background task is already running for this executionId,
+        // skip quietly. This handles races between different controllers calling startExecution().
+        if (!activeExecutions.add(executionId)) {
+            log.warn("[FlowService] startExecution DUPLICATE — executionId={} already submitted, skipping", executionId);
+            return;
+        }
+
         Execution execution = executionRepository.findById(executionId)
                 .orElseThrow(() -> new IllegalArgumentException("Execution not found: " + executionId));
 
@@ -92,14 +110,17 @@ public class FlowService {
                 execution.getFlowId()
         );
 
-        logPoolStats();
-
         Map<String, Object> effectivePayload = execution.getPayload() != null
                 ? execution.getPayload()
                 : (payload != null ? payload : Map.of());
 
-        CompletableFuture.runAsync(() ->
-                runExecutionInBackground(executionId, execution.getFlowId(), effectivePayload),
+        CompletableFuture.runAsync(() -> {
+                    try {
+                        runExecutionInBackground(executionId, execution.getFlowId(), effectivePayload);
+                    } finally {
+                        activeExecutions.remove(executionId);
+                    }
+                },
                 flowExecutionExecutor
         );
     }

@@ -3,11 +3,13 @@ package com.nexflow.nexflow_backend.model.nco;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.nexflow.nexflow_backend.NcoMeta;
+import com.nexflow.nexflow_backend.model.domain.FlowNode;
 import lombok.Builder;
 import lombok.Data;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -40,6 +42,14 @@ public class NexflowContextObject {
     @Builder.Default
     private List<String> nodeExecutionOrder = new ArrayList<>();
 
+    /**
+     * All flow nodes for the current execution.
+     * Set once at execution start and treated as read-only.
+     * Used by FORK/JOIN branch resolution to avoid DB access on branch threads.
+     */
+    @JsonIgnore
+    private List<FlowNode> flowNodes;
+
 //    Factory Method
     public static NexflowContextObject create(String flowId, String executionId) {
         return NexflowContextObject.builder()
@@ -69,6 +79,18 @@ public class NexflowContextObject {
         return nodeAliases.get(key);
     }
 
+    /**
+     * Returns all flow nodes for this execution.
+     * Never returns null — falls back to an empty list when not populated.
+     */
+    public List<FlowNode> getFlowNodes() {
+        return flowNodes != null ? flowNodes : Collections.emptyList();
+    }
+
+    public void setFlowNodes(List<FlowNode> flowNodes) {
+        this.flowNodes = flowNodes;
+    }
+
     public void setVariable(String key, Object value) {
         variables.put(key, value);
     }
@@ -84,5 +106,27 @@ public class NexflowContextObject {
         if (nodes != null) merged.putAll(nodes);
         if (nodeAliases != null) merged.putAll(nodeAliases);
         return merged;
+    }
+
+    /**
+     * Factory method for creating an isolated branch context that shares
+     * meta + variables with the parent, but has its own node maps and nex.
+     * Flow nodes are carried over so branch threads can resolve nodes by ID.
+     */
+    public static NexflowContextObject forBranch(
+            NexflowContextObject parent,
+            Map<String, Object> branchNex,
+            String branchName
+    ) {
+        NexflowContextObject ctx = NexflowContextObject.builder()
+                .meta(parent.getMeta())
+                .variables(new LinkedHashMap<>(parent.getVariables()))
+                .nodes(new LinkedHashMap<>())
+                .nodeAliases(new LinkedHashMap<>())
+                .nex(branchNex != null ? branchNex : new LinkedHashMap<>())
+                .nodeExecutionOrder(new ArrayList<>())
+                .build();
+        ctx.setFlowNodes(parent.getFlowNodes());
+        return ctx;
     }
 }

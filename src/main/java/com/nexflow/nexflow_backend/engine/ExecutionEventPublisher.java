@@ -14,6 +14,8 @@ import java.util.Map;
 public class ExecutionEventPublisher {
 
     private static final String TOPIC_PREFIX = "/queue/execution.";
+    /** Separate queue prefix so branch events don't mix with node events. */
+    private static final String BRANCH_PREFIX = "/queue/branch.";
 
     private final SimpMessagingTemplate messagingTemplate;
 
@@ -64,6 +66,58 @@ public class ExecutionEventPublisher {
                 status.name(),
                 error != null && !error.isBlank(),
                 nexSize
+            );
+        }
+
+        messagingTemplate.convertAndSend(destination, payload);
+    }
+
+    // ── Branch events ─────────────────────────────────────────────────────────
+
+    public void branchStarted(String executionId, String forkNodeId, String branchName) {
+        publishBranchEvent(executionId, forkNodeId, branchName, "RUNNING", null, null);
+    }
+
+    public void branchCompleted(
+            String executionId,
+            String forkNodeId,
+            String branchName,
+            NodeStatus status,
+            Long durationMs,
+            String error) {
+        publishBranchEvent(executionId, forkNodeId, branchName, status.name(), durationMs, error);
+    }
+
+    private void publishBranchEvent(
+            String executionId,
+            String forkNodeId,
+            String branchName,
+            String status,
+            Long durationMs,
+            String error) {
+
+        Map<String, Object> payload = new java.util.LinkedHashMap<>();
+        payload.put("type",        "BRANCH_EVENT");
+        payload.put("executionId", executionId);
+        payload.put("forkNodeId",  forkNodeId);
+        payload.put("branchName",  branchName);
+        payload.put("status",      status);
+        if (durationMs != null) {
+            payload.put("durationMs", durationMs);
+        }
+        if (error != null) {
+            payload.put("error", error);
+        }
+
+        String destination = BRANCH_PREFIX + executionId;
+
+        if (log.isInfoEnabled()) {
+            log.info(
+                "[ExecutionEventPublisher] branch event dest='{}' forkNodeId={} branchName={} status={}",
+                destination,
+                forkNodeId,
+                branchName,
+                status
             );
         }
 

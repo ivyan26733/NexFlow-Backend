@@ -18,5 +18,9 @@ public enum NodeType {
     KAFKA_PRODUCER,
     KAFKA_CONSUMER,
     DELAY,
-    TRANSFORM
+    TRANSFORM,
+
+    // Parallel execution
+    FORK,   // splits flow into parallel branches — paired with JOIN
+    JOIN    // converges parallel branches — paired with FORK
 }

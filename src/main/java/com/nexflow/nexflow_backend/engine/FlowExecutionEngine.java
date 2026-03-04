@@ -67,6 +67,10 @@ public class FlowExecutionEngine {
         List<FlowNode> allNodes = new ArrayList<>(nodeRepository.findByFlowId(flowId));
         List<FlowEdge> allEdges = edgeRepository.findByFlowId(flowId);
 
+        // Make all flow nodes available on the NCO so branch executors can resolve
+        // nodes by ID without hitting the database from branch threads.
+        nco.setFlowNodes(allNodes);
+
         FlowNode startNode = findStartNodeOrCreateDefault(allNodes, flowId);
         injectTriggerPayload(startNode, nco, triggerPayload);
 
@@ -207,7 +211,70 @@ public class FlowExecutionEngine {
 
         return nco;
     }
-    
+
+    /**
+     * Runs a pre-scoped list of branch nodes in sequence on the calling thread.
+     *
+     * CRITICAL: the nodes list must NOT contain the parent FORK node or any JOIN node.
+     * Passing the full flow node list here would cause infinite recursion because each
+     * branch would re-execute the FORK node and spawn another generation of branches.
+     *
+     * This method is called by ForkNodeExecutor from inside a CompletableFuture —
+     * it runs on a dedicated pool thread, not the main flow thread.
+     */
+    public void executeBranch(
+            List<FlowNode> nodes,
+            NexflowContextObject branchNco,
+            String executionId,
+            String branchName
+    ) {
+        log.info("[FlowExecutionEngine] executeBranch START branch='{}' executionId='{}' nodeCount={}",
+                branchName, executionId, nodes != null ? nodes.size() : 0);
+
+        if (nodes == null || nodes.isEmpty()) {
+            log.info("[FlowExecutionEngine] executeBranch END branch='{}' executionId='{}' (no nodes)", branchName, executionId);
+            return;
+        }
+
+        for (FlowNode node : nodes) {
+
+            // Safety guard: FORK/JOIN must never run inside a branch. If they appear here,
+            // branch configuration is wrong. Skip with an error log instead of recursing.
+            if (node.getNodeType() == NodeType.FORK || node.getNodeType() == NodeType.JOIN) {
+                log.error("[FlowExecutionEngine] executeBranch RECURSION GUARD — skipping {} node '{}' in branch '{}'. " +
+                                "The FORK/JOIN nodes must not appear in branch node lists. " +
+                                "Fix branch configuration to remove nodeId='{}'.",
+                        node.getNodeType(), node.getLabel(), branchName, node.getId());
+                continue;
+            }
+
+            eventPublisher.nodeStarted(executionId, node.getId().toString());
+
+            try {
+                NodeContext result = runNode(node, branchNco, executionId);
+                branchNco.setNodeOutput(node.getId().toString(), result);
+                branchNco.setNodeAlias(toLabelKey(node.getLabel()), result);
+
+                if (result.getStatus() == NodeStatus.FAILURE) {
+                    eventPublisher.nodeError(executionId, node.getId().toString(), "Node returned FAILURE");
+                    throw new RuntimeException("Branch node '" + node.getLabel() + "' returned FAILURE");
+                }
+
+                eventPublisher.nodeCompleted(executionId, node.getId().toString(), result.getStatus(), branchNco.getNex());
+
+            } catch (RuntimeException e) {
+                eventPublisher.nodeError(executionId, node.getId().toString(), e.getMessage());
+                throw e;
+            } catch (Exception e) {
+                eventPublisher.nodeError(executionId, node.getId().toString(), e.getMessage());
+                throw new RuntimeException(
+                        "Branch '" + branchName + "' failed at node '" + node.getLabel() + "': " + e.getMessage(), e);
+            }
+        }
+
+        log.info("[FlowExecutionEngine] executeBranch END branch='{}' executionId='{}'", branchName, executionId);
+    }
+
     private NodeContext runNode(FlowNode flowNode, NexflowContextObject nco, String executionId) {
         NodeType nodeType = flowNode.getNodeType();
         if (nodeType == null) {
