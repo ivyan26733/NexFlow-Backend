@@ -1,4 +1,4 @@
-package com.nexflow.nexflow_backend.executor;
+package com.nexflow.nexflow_backend.repository;
 
 import com.nexflow.nexflow_backend.model.domain.FlowNode;
 import com.nexflow.nexflow_backend.model.domain.NodeType;

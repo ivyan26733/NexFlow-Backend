@@ -1,4 +1,4 @@
-package com.nexflow.nexflow_backend.executor.llm;
+package com.nexflow.nexflow_backend.repository;
 
 import com.nexflow.nexflow_backend.model.domain.LlmProvider;
 import com.nexflow.nexflow_backend.model.llm.LlmRequest;

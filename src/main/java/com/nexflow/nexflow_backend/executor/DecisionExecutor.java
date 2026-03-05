@@ -6,6 +6,7 @@ import com.nexflow.nexflow_backend.model.domain.NodeType;
 import com.nexflow.nexflow_backend.model.nco.NexflowContextObject;
 import com.nexflow.nexflow_backend.model.nco.NodeContext;
 import com.nexflow.nexflow_backend.model.nco.NodeStatus;
+import com.nexflow.nexflow_backend.repository.NodeExecutor;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 

@@ -2,7 +2,7 @@ package com.nexflow.nexflow_backend.executor.impl;
 
 import com.nexflow.nexflow_backend.engine.ExecutionEventPublisher;
 import com.nexflow.nexflow_backend.engine.FlowExecutionEngine;
-import com.nexflow.nexflow_backend.executor.NodeExecutor;
+import com.nexflow.nexflow_backend.repository.NodeExecutor;
 import com.nexflow.nexflow_backend.model.domain.BranchExecution;
 import com.nexflow.nexflow_backend.model.domain.BranchExecutionStatus;
 import com.nexflow.nexflow_backend.model.domain.FlowNode;
@@ -32,6 +32,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
 
 /**
@@ -50,8 +51,9 @@ public class ForkNodeExecutor implements NodeExecutor {
     private final ObjectProvider<FlowExecutionEngine> engineProvider;
     private final BranchExecutionRepository branchRepo;
     private final ExecutionEventPublisher eventPublisher;
-    @Qualifier("flowExecutionExecutor")
-    private final Executor flowExecutionExecutor;
+    /** Dedicated pool for branch tasks so branches run in parallel (not shared with main flow thread). */
+    @Qualifier("forkBranchExecutor")
+    private final Executor forkBranchExecutor;
 
     @Override
     public NodeType supportedType() {
@@ -73,15 +75,25 @@ public class ForkNodeExecutor implements NodeExecutor {
             return failure(node, "FORK node has no branches configured.");
         }
 
+        // Normalise config so frontend can send "fail_fast", "CONTINUE", "wait-all" etc.
+        // Support both camelCase and snake_case keys (e.g. from different serialization)
+        String onBranchFailureRaw = getString(cfg, "onBranchFailure",
+                getString(cfg, "on_branch_failure", ""));
+        String onBranchFailure = normalise(onBranchFailureRaw != null && !onBranchFailureRaw.isBlank()
+                ? onBranchFailureRaw : "CONTINUE");
+        String onTimeout = normalise(getString(cfg, "onTimeout", "FAIL"));
+        String strategyStr = normalise(getString(cfg, "strategy", "WAIT_ALL"));
+
         int timeoutSeconds = getInt(cfg, "timeoutSeconds", DEFAULT_TIMEOUT_SECONDS);
-        String strategyStr = getString(cfg, "strategy", "WAIT_ALL");
-        int waitForCount = getInt(cfg, "waitForCount", branchNames.size());
-        boolean failFast = getString(cfg, "onBranchFailure", "FAIL_FAST").equals("FAIL_FAST");
-        boolean continuePartial = getString(cfg, "onTimeout", "FAIL").equals("CONTINUE_WITH_PARTIAL");
+        int waitForN = getInt(cfg, "waitForN", getInt(cfg, "waitForCount", branchNames.size()));
+        // Only fail whole flow when explicitly FAIL_FAST; missing/blank/anything else = CONTINUE
+        boolean failFast = "FAIL_FAST".equals(onBranchFailure);
+        // Frontend sends ON TIMEOUT as either FAIL or CONTINUE_WITH_PARTIAL
+        boolean continuePartial = "CONTINUE_WITH_PARTIAL".equals(onTimeout);
 
         JoinStrategy strategy;
         try {
-            strategy = JoinStrategy.valueOf(strategyStr.toUpperCase());
+            strategy = JoinStrategy.valueOf(strategyStr);
         } catch (IllegalArgumentException e) {
             log.warn("[ForkNode] Unknown strategy '{}', defaulting to WAIT_ALL", strategyStr);
             strategy = JoinStrategy.WAIT_ALL;
@@ -90,8 +102,8 @@ public class ForkNodeExecutor implements NodeExecutor {
         String executionId = nco.getMeta().getExecutionId();
         UUID forkNodeId = node.getId();
 
-        log.info("[ForkNode] '{}' starting fork — branches={} strategy={} timeout={}s",
-                node.getLabel(), branchNames, strategy, timeoutSeconds);
+        log.info("[ForkNode] '{}' starting — branches={} strategy={} onBranchFailure={} failFast={} timeoutSeconds={}",
+                node.getLabel(), branchNames, strategy, onBranchFailure, failFast, timeoutSeconds);
 
         eventPublisher.nodeStarted(executionId, node.getId().toString());
 
@@ -121,7 +133,15 @@ public class ForkNodeExecutor implements NodeExecutor {
                     branchName,
                     branchNodes.size(),
                     branchNodes.stream().map(FlowNode::getLabel).collect(Collectors.toList()));
+            if (branchNodes.size() > 1) {
+                log.warn("[ForkNode] branch '{}' has {} nodes — they run in sequence inside this branch (cumulative time). For parallel execution use one node per branch.",
+                        branchName, branchNodes.size());
+            }
         }
+        // Debug: log whether branchNodeIds was present so FAIL_FAST can ever fire (branches need nodes to fail)
+        Object rawBranchNodeIds = node.getConfig() != null ? node.getConfig().get("branchNodeIds") : null;
+        log.info("[ForkNode] '{}' config.branchNodeIds present={} (branches need nodes connected from branch handles for branch failures to be detected)",
+                node.getLabel(), rawBranchNodeIds != null);
 
         // Launch all branches on dedicated executor — each with its own scoped node list
         List<CompletableFuture<BranchResult>> futures = branchNames.stream()
@@ -134,13 +154,13 @@ public class ForkNodeExecutor implements NodeExecutor {
                                 executionId,
                                 forkNodeId
                         ),
-                        flowExecutionExecutor
+                        forkBranchExecutor
                 ))
                 .toList();
 
         List<BranchResult> results;
         try {
-            results = applyStrategy(strategy, futures, waitForCount, timeoutSeconds, continuePartial, branchNames);
+            results = applyStrategy(strategy, futures, waitForN, timeoutSeconds, continuePartial, failFast, branchNames);
         } catch (Exception e) {
             log.error("[ForkNode] '{}' strategy execution failed: {}", node.getLabel(), e.getMessage());
             cancelAllFutures(futures);
@@ -150,24 +170,46 @@ public class ForkNodeExecutor implements NodeExecutor {
 
         long totalParallelMs = System.currentTimeMillis() - forkStartMs;
 
-        List<BranchResult> failures = results.stream()
-                .filter(r -> r.isFailed() || r.isTimeout())
-                .toList();
+        List<BranchResult> succeeded = results.stream().filter(BranchResult::isSuccess).toList();
+        List<BranchResult> failures = results.stream().filter(BranchResult::isFailure).toList();
 
-        if (!failures.isEmpty() && failFast) {
-            String errorSummary = failures.stream()
-                    .map(r -> r.getBranchName() + ": " + r.getErrorMessage())
-                    .collect(Collectors.joining(", "));
-            log.error("[ForkNode] '{}' failed branches: {}", node.getLabel(), errorSummary);
-            eventPublisher.nodeError(executionId, node.getId().toString(), errorSummary);
+        log.info("[ForkNode] '{}' completed — succeeded={} failed={} onBranchFailure={}",
+                node.getLabel(), succeeded.size(), failures.size(), onBranchFailure);
+
+        if (!failures.isEmpty()) {
+            if (failFast) {
+                String errorSummary = failures.stream()
+                        .map(r -> r.getBranchName() + ": " + r.getErrorMessage())
+                        .collect(Collectors.joining(", "));
+
+                // Fail‑fast semantics: cancel any still‑running branch futures so they don't do useless work
+                cancelAllFutures(futures);
+
+                log.error("[ForkNode] '{}' FAIL_FAST — failed branches: {}", node.getLabel(), errorSummary);
+                eventPublisher.nodeError(executionId, node.getId().toString(), errorSummary);
+                updateBranchRecords(dbBranches, results);
+                return failure(node, errorSummary);
+            } else {
+                // CONTINUE — log but proceed with succeeded branches only
+                failures.forEach(r ->
+                        log.warn("[ForkNode] '{}' branch '{}' failed but CONTINUE policy — skipping. Error: {}",
+                                node.getLabel(), r.getBranchName(), r.getErrorMessage())
+                );
+            }
+        }
+
+        // WAIT_N quorum: require at least waitForN succeeded branches
+        if (JoinStrategy.WAIT_N.equals(strategy) && succeeded.size() < waitForN) {
+            log.error("[ForkNode] '{}' WAIT_N={} but only {} branches succeeded",
+                    node.getLabel(), waitForN, succeeded.size());
+            eventPublisher.nodeError(executionId, node.getId().toString(),
+                    "WAIT_N quorum not met: only " + succeeded.size() + " succeeded");
             updateBranchRecords(dbBranches, results);
-            return failure(node, errorSummary);
+            return failure(node, "WAIT_N quorum not met");
         }
 
         // Merge successful branch outputs into parent nex
-        results.stream()
-                .filter(BranchResult::isSuccess)
-                .forEach(r -> nco.getNex().put(r.getBranchName(), r.getNex()));
+        succeeded.forEach(r -> nco.getNex().put(r.getBranchName(), r.getNex()));
 
         // Write timing and status metadata under nex.join
         Map<String, Object> joinMeta = new LinkedHashMap<>();
@@ -236,11 +278,14 @@ public class ForkNodeExecutor implements NodeExecutor {
             log.info("[ForkNode] Branch '{}' SUCCESS in {}ms", branchName, durationMs);
             return BranchResult.success(branchName, branchNco.getNex(), durationMs);
 
-        } catch (Exception e) {
+        } catch (Throwable t) {
+            // Catch everything so the CompletableFuture never completes exceptionally —
+            // otherwise allOf().join() would throw and onBranchFailure would never be applied.
             long durationMs = System.currentTimeMillis() - startMs;
-            log.error("[ForkNode] Branch '{}' FAILED after {}ms: {}", branchName, durationMs, e.getMessage(), e);
-            eventPublisher.branchCompleted(executionId, forkNodeId.toString(), branchName, NodeStatus.FAILURE, durationMs, e.getMessage());
-            return BranchResult.failure(branchName, e.getMessage(), durationMs);
+            String msg = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
+            log.error("[ForkNode] Branch '{}' FAILED after {}ms: {}", branchName, durationMs, msg, t);
+            eventPublisher.branchCompleted(executionId, forkNodeId.toString(), branchName, NodeStatus.FAILURE, durationMs, msg);
+            return BranchResult.failure(branchName, msg, durationMs);
         }
     }
 
@@ -250,6 +295,7 @@ public class ForkNodeExecutor implements NodeExecutor {
             int waitForCount,
             int timeoutSeconds,
             boolean continuePartial,
+            boolean failFast,
             List<String> branchNames) throws Exception {
 
         switch (strategy) {
@@ -269,14 +315,60 @@ public class ForkNodeExecutor implements NodeExecutor {
                 return futures.stream().map(CompletableFuture::join).toList();
             }
             case WAIT_FIRST -> {
-                CompletableFuture<Object> anyDone = CompletableFuture.anyOf(
-                        futures.toArray(new CompletableFuture[0]));
-                anyDone.get(timeoutSeconds, TimeUnit.SECONDS);
-                cancelAllFutures(futures);
-                return futures.stream()
-                        .map(f -> f.isDone() ? f.join()
-                                : BranchResult.cancelled(extractBranchName(f, branchNames, futures)))
-                        .toList();
+                // Race mode:
+                // - Default: first SUCCESS wins, other branches are cancelled.
+                // - With FAIL_FAST enabled: if any branch fails before a success arrives, fail the whole FORK immediately.
+
+                CompletableFuture<BranchResult> firstSuccess = new CompletableFuture<>();
+
+                futures.forEach(f -> f.whenComplete((result, ex) -> {
+                    if (firstSuccess.isDone()) {
+                        return;
+                    }
+                    BranchResult r = result != null
+                            ? result
+                            : BranchResult.failure("unknown",
+                                    ex != null && ex.getMessage() != null ? ex.getMessage() : "unknown", 0);
+
+                    if (failFast && r.isFailure()) {
+                        // Short‑circuit the whole fork on first branch failure
+                        firstSuccess.completeExceptionally(new RuntimeException(
+                                "FAIL_FAST: branch '" + r.getBranchName() + "' failed: " + r.getErrorMessage()));
+                        return;
+                    }
+
+                    if (r.isSuccess()) {
+                        firstSuccess.complete(r);
+                    }
+                }));
+
+                try {
+                    BranchResult winner = firstSuccess.get(timeoutSeconds, TimeUnit.SECONDS);
+                    cancelAllFutures(futures);
+                    log.info("[ForkNode] WAIT_FIRST — winner: '{}' in {}ms",
+                            winner.getBranchName(), winner.getDurationMs());
+                    // Winner + cancelled placeholders so merge and updateBranchRecords see full picture
+                    List<BranchResult> list = new ArrayList<>();
+                    list.add(winner);
+                    for (String name : branchNames) {
+                        if (!name.equals(winner.getBranchName())) {
+                            list.add(BranchResult.cancelled(name));
+                        }
+                    }
+                    return list;
+                } catch (TimeoutException e) {
+                    log.warn("[ForkNode] WAIT_FIRST timeout after {}s", timeoutSeconds);
+                    cancelAllFutures(futures);
+                    if (!continuePartial) {
+                        throw new RuntimeException("Fork WAIT_FIRST timed out after " + timeoutSeconds + "s");
+                    }
+                    return collectWithTimeout(futures, branchNames);
+                } catch (ExecutionException e) {
+                    // FAIL_FAST path: a branch failed before any success
+                    cancelAllFutures(futures);
+                    Throwable cause = e.getCause() != null ? e.getCause() : e;
+                    throw new RuntimeException(cause.getMessage(), cause);
+                }
             }
             case WAIT_N -> {
                 int target = Math.min(waitForCount, futures.size());
@@ -436,6 +528,12 @@ public class ForkNodeExecutor implements NodeExecutor {
     private int getInt(Map<String, Object> cfg, String key, int def) {
         Object v = cfg.get(key);
         return v instanceof Number n ? n.intValue() : def;
+    }
+
+    /** Normalise config values so frontend can send "fail_fast", "continue", "wait-all" etc. */
+    private static String normalise(String value) {
+        if (value == null || value.isBlank()) return value;
+        return value.toUpperCase().replace("-", "_").replace(" ", "_").trim();
     }
 
     private NodeContext failure(FlowNode node, String message) {

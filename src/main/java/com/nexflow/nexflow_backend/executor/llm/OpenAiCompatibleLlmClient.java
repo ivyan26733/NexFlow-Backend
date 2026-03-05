@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nexflow.nexflow_backend.model.domain.LlmProvider;
 import com.nexflow.nexflow_backend.model.llm.LlmRequest;
 import com.nexflow.nexflow_backend.model.llm.LlmResponse;
+import com.nexflow.nexflow_backend.repository.LlmClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;

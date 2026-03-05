@@ -1,6 +1,7 @@
 package com.nexflow.nexflow_backend.executor;
 
 import com.nexflow.nexflow_backend.model.domain.NodeType;
+import com.nexflow.nexflow_backend.repository.NodeExecutor;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;

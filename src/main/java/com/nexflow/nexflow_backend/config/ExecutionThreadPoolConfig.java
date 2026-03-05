@@ -28,5 +28,24 @@ public class ExecutionThreadPoolConfig {
         executor.initialize();
         return executor;
     }
+
+    /**
+     * Dedicated thread pool for FORK branch execution only.
+     * Ensures branches run in parallel: core size is set so multiple branches
+     * get threads at once (e.g. 3 branches = 3 threads), avoiding cumulative
+     * runtimes when each branch has the same timeout.
+     */
+    @Bean(name = "forkBranchExecutor")
+    public Executor forkBranchExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(20);
+        executor.setMaxPoolSize(50);
+        executor.setQueueCapacity(200);
+        executor.setThreadNamePrefix("fork-branch-");
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(60);
+        executor.initialize();
+        return executor;
+    }
 }
 

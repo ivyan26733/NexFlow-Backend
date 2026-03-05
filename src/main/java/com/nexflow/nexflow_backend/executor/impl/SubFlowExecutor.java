@@ -1,6 +1,6 @@
 package com.nexflow.nexflow_backend.executor.impl;
 
-import com.nexflow.nexflow_backend.executor.NodeExecutor;
+import com.nexflow.nexflow_backend.repository.NodeExecutor;
 import com.nexflow.nexflow_backend.executor.ReferenceResolver;
 import com.nexflow.nexflow_backend.model.domain.Execution;
 import com.nexflow.nexflow_backend.model.domain.Flow;

@@ -3,7 +3,7 @@ package com.nexflow.nexflow_backend.executor.impl;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nexflow.nexflow_backend.executor.ReferenceResolver;
-import com.nexflow.nexflow_backend.executor.llm.LlmClient;
+import com.nexflow.nexflow_backend.repository.LlmClient;
 import com.nexflow.nexflow_backend.executor.llm.LlmClientFactory;
 import com.nexflow.nexflow_backend.model.domain.FlowNode;
 import com.nexflow.nexflow_backend.model.domain.LlmProvider;
@@ -15,6 +15,7 @@ import com.nexflow.nexflow_backend.model.nco.NodeContext;
 import com.nexflow.nexflow_backend.model.nco.NodeStatus;
 import com.nexflow.nexflow_backend.model.nco.NexflowContextObject;
 import com.nexflow.nexflow_backend.repository.LlmProviderConfigRepository;
+import com.nexflow.nexflow_backend.repository.NodeExecutor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -24,7 +25,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Component
-public class AiNodeExecutor implements com.nexflow.nexflow_backend.executor.NodeExecutor {
+public class AiNodeExecutor implements NodeExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(AiNodeExecutor.class);
     private static final int MAX_INPUT_CHARS = 12_000;

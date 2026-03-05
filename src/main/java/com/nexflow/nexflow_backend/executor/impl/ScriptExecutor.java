@@ -1,7 +1,7 @@
 package com.nexflow.nexflow_backend.executor.impl;
 
 import com.nexflow.nexflow_backend.engine.ScriptRunner;
-import com.nexflow.nexflow_backend.executor.NodeExecutor;
+import com.nexflow.nexflow_backend.repository.NodeExecutor;
 import com.nexflow.nexflow_backend.model.domain.FlowNode;
 import com.nexflow.nexflow_backend.model.domain.NodeType;
 import com.nexflow.nexflow_backend.model.nco.NexflowContextObject;

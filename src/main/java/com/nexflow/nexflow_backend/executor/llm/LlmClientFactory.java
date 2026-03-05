@@ -1,6 +1,7 @@
 package com.nexflow.nexflow_backend.executor.llm;
 
 import com.nexflow.nexflow_backend.model.domain.LlmProvider;
+import com.nexflow.nexflow_backend.repository.LlmClient;
 import org.springframework.stereotype.Component;
 
 import java.util.EnumMap;

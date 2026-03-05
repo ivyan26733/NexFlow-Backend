@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -67,6 +68,10 @@ public class FlowExecutionEngine {
         List<FlowNode> allNodes = new ArrayList<>(nodeRepository.findByFlowId(flowId));
         List<FlowEdge> allEdges = edgeRepository.findByFlowId(flowId);
 
+        // If a FORK node has no branchNodeIds in config (e.g. flow saved before UI set it), derive from edges:
+        // edges from FORK with sourceHandle = branch name → target node belongs to that branch.
+        ensureForkBranchNodeIdsFromEdges(allNodes, allEdges);
+
         // Make all flow nodes available on the NCO so branch executors can resolve
         // nodes by ID without hitting the database from branch threads.
         nco.setFlowNodes(allNodes);
@@ -89,8 +94,11 @@ public class FlowExecutionEngine {
 
         Queue<FlowNode> queue = new LinkedList<>();
         queue.add(startNode);
-        boolean CheckOutputFlag = true;
+        boolean checkOutputFlag = true;
+        boolean reachedSuccessTerminal = false;
         Set<UUID> executedNodeIds = new HashSet<>();
+        /** Nodes we marked executed only because they ran inside a FORK branch (so we don't treat "JOIN → branch nodes" as a loop). */
+        Set<UUID> branchOnlyExecutedNodeIds = new HashSet<>();
 
         while (!queue.isEmpty()) {
             FlowNode current = queue.poll();
@@ -110,7 +118,7 @@ public class FlowExecutionEngine {
                 nco.getMeta().setErrorMessage(
                     "Execution stopped: max steps exceeded (" + MAX_NODE_EXECUTIONS + "). Possible loop in flow (e.g. SubFlow ↔ Script). Fix the flow to remove cycles."
                 );
-                CheckOutputFlag = false;
+                checkOutputFlag = false;
                 break;
             }
 
@@ -166,9 +174,22 @@ public class FlowExecutionEngine {
             nco.getNodeExecutionOrder().add(current.getId().toString());
             executedNodeIds.add(current.getId());
 
-            if(result.getStatus() == NodeStatus.FAILURE) CheckOutputFlag = false;
+            // Nodes that ran inside FORK branches were not "current" in the main loop, so they are not in executedNodeIds.
+            // Mark them as executed so we never run them again after the JOIN (avoids re-executing branch scripts).
+            if (current.getNodeType() == NodeType.FORK && result.getStatus() == NodeStatus.SUCCESS) {
+                addForkBranchNodeIdsToExecuted(current, executedNodeIds, branchOnlyExecutedNodeIds);
+            }
 
-            if(isTerminal(current.getNodeType())) break;
+            if (result.getStatus() == NodeStatus.FAILURE) checkOutputFlag = false;
+            if (current.getNodeType() == NodeType.SUCCESS && result.getStatus() == NodeStatus.SUCCESS) reachedSuccessTerminal = true;
+
+            // Hard fail-fast for FORK nodes that themselves failed (e.g. onBranchFailure=FAIL_FAST or WAIT_N quorum not met):
+            // as soon as the FORK returns FAILURE, stop enqueuing any further nodes.
+            if (current.getNodeType() == NodeType.FORK && result.getStatus() == NodeStatus.FAILURE) {
+                log.error("[FlowExecutionEngine] Node '{}' (FORK) returned FAILURE — stopping flow execution (JOIN and downstream nodes will NOT run)",
+                        current.getLabel());
+                break;
+            }
 
             // Resolve next nodes, then filter: allow re-entry only for LOOP nodes (intentional); others = cycle → FAILURE
             List<FlowNode> nextNodes = new ArrayList<>(resolveNextNodes(current, result.getStatus(), allEdges, allNodes));
@@ -189,18 +210,34 @@ public class FlowExecutionEngine {
             }
 
             if (!nextNodes.isEmpty() && toEnqueue.isEmpty()) {
-                // All next nodes were already executed and re-entry not allowed (no CONTINUE edge, no LOOP) → accidental cycle
-                log.warn("Execution {} stopped: loop detected. Flow would re-enter node(s) that already ran.", executionId);
-                nco.getMeta().setErrorMessage(
-                    "Loop detected: execution would re-enter a node that already ran. Check for cycles in the flow (e.g. SubFlow connected back to Script, or two nodes pointing to each other). Remove the cycle to fix."
-                );
-                CheckOutputFlag = false;
-                break;
+                // All next nodes were already executed. If they are only FORK branch nodes we already ran, follow edges FROM them (e.g. to JOIN) and enqueue those.
+                boolean allNextAreBranchNodesOnly = nextNodes.stream()
+                        .allMatch(next -> branchOnlyExecutedNodeIds.contains(next.getId()));
+                if (allNextAreBranchNodesOnly) {
+                    for (FlowNode branchNode : nextNodes) {
+                        List<FlowNode> afterBranch = resolveNextNodes(branchNode, NodeStatus.SUCCESS, allEdges, allNodes);
+                        for (FlowNode n : afterBranch) {
+                            if (!executedNodeIds.contains(n.getId()) && toEnqueue.stream().noneMatch(x -> x.getId().equals(n.getId()))) {
+                                toEnqueue.add(n);
+                            }
+                        }
+                    }
+                    if (toEnqueue.isEmpty()) {
+                        log.debug("[FlowExecutionEngine] No nodes after branch nodes (e.g. no JOIN or downstream); completing normally.");
+                    }
+                } else {
+                    log.warn("Execution {} stopped: loop detected. Flow would re-enter node(s) that already ran.", executionId);
+                    nco.getMeta().setErrorMessage(
+                        "Loop detected: execution would re-enter a node that already ran. Check for cycles in the flow (e.g. SubFlow connected back to Script, or two nodes pointing to each other). Remove the cycle to fix."
+                    );
+                    checkOutputFlag = false;
+                    break;
+                }
             }
             queue.addAll(toEnqueue);
         }
 
-        finalizeExecution(nco, CheckOutputFlag);
+        finalizeExecution(nco, checkOutputFlag, reachedSuccessTerminal);
 
         log.info(
                 "[FlowExecutionEngine] END executionId={} flowId={} status={}",
@@ -439,6 +476,69 @@ public class FlowExecutionEngine {
         return key.toString();
     }
 
+    /**
+     * For each FORK node, if config.branchNodeIds is missing or empty, derive it from edges:
+     * any edge from this FORK with a non-blank sourceHandle (branch name) adds the target node to that branch.
+     * This covers flows where the user connected nodes from the FORK's branch handles but branchNodeIds
+     * was not persisted (e.g. save/load quirk or older flow).
+     */
+    /**
+     * Adds all node IDs that were executed inside the FORK's branches to executedNodeIds and branchOnlyExecutedNodeIds.
+     * This prevents the main loop from re-running those nodes when it reaches the JOIN, and allows us to treat
+     * "JOIN's next are only these branch nodes" as normal completion (not a loop).
+     */
+    @SuppressWarnings("unchecked")
+    private void addForkBranchNodeIdsToExecuted(FlowNode forkNode, Set<UUID> executedNodeIds, Set<UUID> branchOnlyExecutedNodeIds) {
+        Object raw = forkNode.getConfig() != null ? forkNode.getConfig().get("branchNodeIds") : null;
+        if (!(raw instanceof Map<?, ?>)) return;
+        Map<String, List<String>> branchNodeIds = (Map<String, List<String>>) raw;
+        for (List<String> ids : branchNodeIds.values()) {
+            if (ids == null) continue;
+            for (String idStr : ids) {
+                if (idStr == null || idStr.isBlank()) continue;
+                try {
+                    UUID id = UUID.fromString(idStr.trim());
+                    executedNodeIds.add(id);
+                    if (branchOnlyExecutedNodeIds != null) branchOnlyExecutedNodeIds.add(id);
+                } catch (IllegalArgumentException ignored) { /* skip invalid UUIDs */ }
+            }
+        }
+    }
+
+    private void ensureForkBranchNodeIdsFromEdges(List<FlowNode> allNodes, List<FlowEdge> allEdges) {
+        for (FlowNode node : allNodes) {
+            if (node.getNodeType() != NodeType.FORK) continue;
+
+            Map<String, Object> config = node.getConfig();
+            if (config == null) {
+                config = new HashMap<>();
+                node.setConfig(config);
+            }
+
+            Object raw = config.get("branchNodeIds");
+            if (raw instanceof Map<?, ?> existing) {
+                boolean hasAnyNodes = existing.values().stream()
+                        .anyMatch(v -> v instanceof List<?> l && !l.isEmpty());
+                if (hasAnyNodes) continue; // already has branch nodes configured
+            }
+
+            // Derive from edges: sourceNodeId = this FORK, sourceHandle = branch name
+            Map<String, List<String>> derived = new LinkedHashMap<>();
+            for (FlowEdge e : allEdges) {
+                if (!e.getSourceNodeId().equals(node.getId())) continue;
+                String handle = e.getSourceHandle();
+                if (handle == null || handle.isBlank()) continue;
+                derived.computeIfAbsent(handle.trim(), k -> new ArrayList<>()).add(e.getTargetNodeId().toString());
+            }
+            if (!derived.isEmpty()) {
+                config.put("branchNodeIds", derived);
+                log.info("[FlowExecutionEngine] Derived branchNodeIds for FORK '{}' from {} edges: {}",
+                        node.getLabel(), allEdges.stream().filter(e -> e.getSourceNodeId().equals(node.getId())).count(),
+                        derived.keySet());
+            }
+        }
+    }
+
     private FlowNode findStartNodeOrCreateDefault(List<FlowNode> nodes, UUID flowId) {
         return nodes.stream()
                 .filter(n -> n.getNodeType() == NodeType.START)
@@ -472,12 +572,15 @@ public class FlowExecutionEngine {
         return type == NodeType.SUCCESS || type == NodeType.FAILURE;
     }
 
-    private void finalizeExecution(NexflowContextObject nco, boolean result) {
+    private void finalizeExecution(NexflowContextObject nco, boolean noFailure, boolean reachedSuccessTerminal) {
         nco.getMeta().setCompletedAt(Instant.now());
-        if (!result) {
-            nco.getMeta().setStatus(ExecutionStatus.FAILURE);
-        } else {
+        // If any path reached a SUCCESS terminal (e.g. after JOIN with onBranchFailure=CONTINUE), treat run as SUCCESS
+        if (reachedSuccessTerminal) {
             nco.getMeta().setStatus(ExecutionStatus.SUCCESS);
+        } else if (noFailure) {
+            nco.getMeta().setStatus(ExecutionStatus.SUCCESS);
+        } else {
+            nco.getMeta().setStatus(ExecutionStatus.FAILURE);
         }
     }
 }

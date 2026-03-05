@@ -2,11 +2,13 @@ package com.nexflow.nexflow_backend.model.dto;
 
 import com.nexflow.nexflow_backend.model.domain.BranchExecutionStatus;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
  * Lightweight result object returned by a completed branch thread.
  * Passed from ForkNodeExecutor back to the JOIN merge step.
+ * Failure path always carries an empty nex (never null) so merge logic is safe.
  */
 public class BranchResult {
 
@@ -23,7 +25,7 @@ public class BranchResult {
                         String errorMessage) {
         this.branchName = branchName;
         this.status = status;
-        this.nex = nex;
+        this.nex = nex != null ? nex : new LinkedHashMap<>();
         this.durationMs = durationMs;
         this.errorMessage = errorMessage;
     }
@@ -32,8 +34,9 @@ public class BranchResult {
         return new BranchResult(name, BranchExecutionStatus.SUCCESS, nex, ms, null);
     }
 
+    /** Failure path — NEVER throws; returns a result with empty nex so merge can proceed when onBranchFailure=CONTINUE. */
     public static BranchResult failure(String name, String error, long ms) {
-        return new BranchResult(name, BranchExecutionStatus.FAILURE, null, ms, error);
+        return new BranchResult(name, BranchExecutionStatus.FAILURE, new LinkedHashMap<>(), ms, error);
     }
 
     public static BranchResult timeout(String name, long ms) {
@@ -47,6 +50,8 @@ public class BranchResult {
 
     public boolean isSuccess()   { return status == BranchExecutionStatus.SUCCESS; }
     public boolean isFailed()    { return status == BranchExecutionStatus.FAILURE; }
+    /** True if branch failed or timed out (used for onBranchFailure policy). Cancelled branches are not considered failure. */
+    public boolean isFailure()   { return status == BranchExecutionStatus.FAILURE || status == BranchExecutionStatus.TIMEOUT; }
     public boolean isTimeout()   { return status == BranchExecutionStatus.TIMEOUT; }
     public boolean isCancelled() { return status == BranchExecutionStatus.CANCELLED; }
 

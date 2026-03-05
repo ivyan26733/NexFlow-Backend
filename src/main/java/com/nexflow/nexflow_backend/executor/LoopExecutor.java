@@ -8,6 +8,7 @@ import com.nexflow.nexflow_backend.model.nco.NodeContext;
 import com.nexflow.nexflow_backend.model.nco.NodeStatus;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.nexflow.nexflow_backend.repository.NodeExecutor;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
