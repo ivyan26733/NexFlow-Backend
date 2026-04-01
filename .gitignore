@@ -53,3 +53,7 @@ build/
 
 ### VS Code ###
 .vscode/
+
+# Cloudflare tunnel binary
+cloudflared.exe
+cloudflared
