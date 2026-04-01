@@ -9,6 +9,7 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Index;
 import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
@@ -27,7 +28,11 @@ import java.util.UUID;
         @Index(name = "idx_branch_exec_execution_id", columnList = "execution_id"),
         @Index(name = "idx_branch_exec_fork_node_id", columnList = "fork_node_id"),
         @Index(name = "idx_branch_exec_exec_fork", columnList = "execution_id, fork_node_id")
-    }
+    },
+    uniqueConstraints = @UniqueConstraint(
+        name = "branch_executions_execution_fork_branch_unique",
+        columnNames = {"execution_id", "fork_node_id", "branch_name"}
+    )
 )
 public class BranchExecution {
 

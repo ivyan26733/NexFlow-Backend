@@ -46,8 +46,17 @@ services:
       RABBITMQ_USERNAME: nexflow
       RABBITMQ_PASSWORD: nexflow123
       RABBITMQ_VHOST: /
-      # Your existing env vars — add whatever else your app needs
-      SPRING_PROFILES_ACTIVE: docker
+      # Spring profile — uses application-prod.properties
+      SPRING_PROFILES_ACTIVE: prod
+      # Database — point at your PostgreSQL (RDS, docker postgres, etc.)
+      PGHOST: ${PGHOST:-localhost}
+      PGPORT: ${PGPORT:-5432}
+      PGDATABASE: ${PGDATABASE:-nexflow}
+      PGUSER: ${PGUSER:-postgres}
+      PGPASSWORD: ${PGPASSWORD:-postgres}
+      PGSSLMODE: ${PGSSLMODE:-disable}
+      # CORS — add your Vercel URL here
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
     ports:
       - "8090:8090"    # change to match your server.port
     restart: on-failure

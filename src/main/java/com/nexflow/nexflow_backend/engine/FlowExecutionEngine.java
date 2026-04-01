@@ -10,8 +10,11 @@ import com.nexflow.nexflow_backend.model.nco.NodeContext;
 import com.nexflow.nexflow_backend.model.nco.NodeStatus;
 import com.nexflow.nexflow_backend.model.nco.RetryConfig;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.nexflow.nexflow_backend.model.domain.NodeExecution;
+import com.nexflow.nexflow_backend.model.domain.NodeExecutionStatus;
 import com.nexflow.nexflow_backend.repository.FlowEdgeRepository;
 import com.nexflow.nexflow_backend.repository.FlowNodeRepository;
+import com.nexflow.nexflow_backend.service.NodeExecutionPersistenceService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import java.time.Instant;
@@ -23,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.time.Duration;
 import java.util.Objects;
 import java.util.Queue;
 import java.util.Set;
@@ -37,17 +41,20 @@ public class FlowExecutionEngine {
     private final NodeExecutorRegistry     executorRegistry;
     private final ExecutionEventPublisher  eventPublisher;
     private final ObjectMapper             objectMapper;
+    private final NodeExecutionPersistenceService nodeExecutionPersistence;
 
     public FlowExecutionEngine(FlowNodeRepository nodeRepository,
                                FlowEdgeRepository edgeRepository,
                                NodeExecutorRegistry executorRegistry,
                                ExecutionEventPublisher eventPublisher,
-                               ObjectMapper objectMapper) {
+                               ObjectMapper objectMapper,
+                               NodeExecutionPersistenceService nodeExecutionPersistence) {
         this.nodeRepository = nodeRepository;
         this.edgeRepository = edgeRepository;
         this.executorRegistry = executorRegistry;
         this.eventPublisher = eventPublisher;
         this.objectMapper = objectMapper;
+        this.nodeExecutionPersistence = nodeExecutionPersistence;
     }
 
     private static final UUID DEFAULT_START_NODE_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");
@@ -285,24 +292,85 @@ public class FlowExecutionEngine {
                 continue;
             }
 
+            // Persist NodeExecution (RUNNING) so transaction detail can show branch node request/response
+            NodeExecution nodeExecution = new NodeExecution();
+            nodeExecution.setExecutionId(UUID.fromString(executionId));
+            nodeExecution.setNodeId(node.getId());
+            nodeExecution.setNodeLabel(node.getLabel());
+            nodeExecution.setNodeType(node.getNodeType().name());
+            nodeExecution.setBranchName(branchName);
+            nodeExecution.setStatus(NodeExecutionStatus.RUNNING);
+            nodeExecution.setInputNex(branchNco.getNex() != null ? new LinkedHashMap<>(branchNco.getNex()) : new LinkedHashMap<>());
+            nodeExecution.setStartedAt(Instant.now());
+            nodeExecutionPersistence.save(nodeExecution);
+
             eventPublisher.nodeStarted(executionId, node.getId().toString());
 
+            Instant nodeStart = Instant.now();
             try {
                 NodeContext result = runNode(node, branchNco, executionId);
                 branchNco.setNodeOutput(node.getId().toString(), result);
                 branchNco.setNodeAlias(toLabelKey(node.getLabel()), result);
 
-                if (result.getStatus() == NodeStatus.FAILURE) {
-                    eventPublisher.nodeError(executionId, node.getId().toString(), "Node returned FAILURE");
-                    throw new RuntimeException("Branch node '" + node.getLabel() + "' returned FAILURE");
+                // Merge node output into branch nex when saveOutputAs is set (so Script/AI etc. output appears in branch nex)
+                if (result.getStatus() != NodeStatus.FAILURE && node.getNodeType() != NodeType.VARIABLE && node.getNodeType() != NodeType.LOOP) {
+                    String saveAs = extractSaveOutputAs(node);
+                    if (saveAs != null && !saveAs.isBlank()) {
+                        String key = saveAs.trim();
+                        if (key.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
+                            Object valueForNex = result.getSuccessOutput() != null ? result.getSuccessOutput() : result.getOutput();
+                            if (valueForNex != null) {
+                                branchNco.getNex().put(key, valueForNex);
+                            }
+                        }
+                    }
                 }
+
+                if (result.getStatus() == NodeStatus.FAILURE) {
+                    long durationMs = Duration.between(nodeStart, Instant.now()).toMillis();
+                    nodeExecution.setStatus(NodeExecutionStatus.FAILURE);
+                    nodeExecution.setFinishedAt(Instant.now());
+                    nodeExecution.setDurationMs(durationMs);
+                    nodeExecution.setOutputNex(branchNco.getNex() != null ? new LinkedHashMap<>(branchNco.getNex()) : new LinkedHashMap<>());
+                    nodeExecution.setErrorMessage(result.getErrorMessage() != null ? result.getErrorMessage() : "Node returned FAILURE");
+                    nodeExecutionPersistence.save(nodeExecution);
+
+                    String err = result.getErrorMessage();
+                    String message = (err != null && !err.isBlank())
+                            ? err
+                            : "Branch node '" + node.getLabel() + "' returned FAILURE";
+                    eventPublisher.nodeError(executionId, node.getId().toString(), message);
+                    throw new RuntimeException(message);
+                }
+
+                nodeExecution.setStatus(NodeExecutionStatus.SUCCESS);
+                nodeExecution.setFinishedAt(Instant.now());
+                nodeExecution.setDurationMs(Duration.between(nodeStart, Instant.now()).toMillis());
+                nodeExecution.setOutputNex(branchNco.getNex() != null ? new LinkedHashMap<>(branchNco.getNex()) : new LinkedHashMap<>());
+                nodeExecutionPersistence.save(nodeExecution);
 
                 eventPublisher.nodeCompleted(executionId, node.getId().toString(), result.getStatus(), branchNco.getNex());
 
             } catch (RuntimeException e) {
+                long durationMs = Duration.between(nodeStart, Instant.now()).toMillis();
+                nodeExecution.setStatus(NodeExecutionStatus.FAILURE);
+                nodeExecution.setFinishedAt(Instant.now());
+                nodeExecution.setDurationMs(durationMs);
+                nodeExecution.setErrorMessage(e.getMessage());
+                nodeExecution.setOutputNex(branchNco.getNex() != null ? new LinkedHashMap<>(branchNco.getNex()) : new LinkedHashMap<>());
+                nodeExecutionPersistence.save(nodeExecution);
+
                 eventPublisher.nodeError(executionId, node.getId().toString(), e.getMessage());
                 throw e;
             } catch (Exception e) {
+                long durationMs = Duration.between(nodeStart, Instant.now()).toMillis();
+                nodeExecution.setStatus(NodeExecutionStatus.FAILURE);
+                nodeExecution.setFinishedAt(Instant.now());
+                nodeExecution.setDurationMs(durationMs);
+                nodeExecution.setErrorMessage(e.getMessage());
+                nodeExecution.setOutputNex(branchNco.getNex() != null ? new LinkedHashMap<>(branchNco.getNex()) : new LinkedHashMap<>());
+                nodeExecutionPersistence.save(nodeExecution);
+
                 eventPublisher.nodeError(executionId, node.getId().toString(), e.getMessage());
                 throw new RuntimeException(
                         "Branch '" + branchName + "' failed at node '" + node.getLabel() + "': " + e.getMessage(), e);

@@ -13,26 +13,29 @@ import com.nexflow.nexflow_backend.model.nco.NexflowContextObject;
 import com.nexflow.nexflow_backend.model.nco.NodeContext;
 import com.nexflow.nexflow_backend.model.nco.NodeStatus;
 import com.nexflow.nexflow_backend.repository.BranchExecutionRepository;
+import com.nexflow.nexflow_backend.service.BranchExecutionPersistenceService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
@@ -50,6 +53,7 @@ public class ForkNodeExecutor implements NodeExecutor {
     // Use ObjectProvider to avoid a hard circular dependency with FlowExecutionEngine.
     private final ObjectProvider<FlowExecutionEngine> engineProvider;
     private final BranchExecutionRepository branchRepo;
+    private final BranchExecutionPersistenceService branchPersistence;
     private final ExecutionEventPublisher eventPublisher;
     /** Dedicated pool for branch tasks so branches run in parallel (not shared with main flow thread). */
     @Qualifier("forkBranchExecutor")
@@ -85,7 +89,7 @@ public class ForkNodeExecutor implements NodeExecutor {
         String strategyStr = normalise(getString(cfg, "strategy", "WAIT_ALL"));
 
         int timeoutSeconds = getInt(cfg, "timeoutSeconds", DEFAULT_TIMEOUT_SECONDS);
-        int waitForN = getInt(cfg, "waitForN", getInt(cfg, "waitForCount", branchNames.size()));
+        int waitForN = getInt(cfg, "waitForN", getInt(cfg, "waitForCount", 2));
         // Only fail whole flow when explicitly FAIL_FAST; missing/blank/anything else = CONTINUE
         boolean failFast = "FAIL_FAST".equals(onBranchFailure);
         // Frontend sends ON TIMEOUT as either FAIL or CONTINUE_WITH_PARTIAL
@@ -106,11 +110,6 @@ public class ForkNodeExecutor implements NodeExecutor {
                 node.getLabel(), branchNames, strategy, onBranchFailure, failFast, timeoutSeconds);
 
         eventPublisher.nodeStarted(executionId, node.getId().toString());
-
-        // One DB row per branch so we can inspect later in Transactions UI
-        List<BranchExecution> dbBranches = branchNames.stream()
-                .map(name -> createBranchRecord(executionId, forkNodeId, name))
-                .collect(Collectors.toList());
 
         // Shallow copies of nex per branch; branches will only add new keys
         Map<String, Map<String, Object>> branchNexCopies = branchNames.stream()
@@ -170,6 +169,37 @@ public class ForkNodeExecutor implements NodeExecutor {
 
         long totalParallelMs = System.currentTimeMillis() - forkStartMs;
 
+        int totalBranches = branchNames.size();
+        // Persist all branch records from the main flow thread so each save runs in its own transaction (REQUIRES_NEW)
+        log.info("[ForkNode] ALL BRANCHES COMPLETE — executionId={} forkNodeId={} totalResults={} (expected {})",
+                executionId, forkNodeId, results.size(), totalBranches);
+        for (BranchResult r : results) {
+            log.info("[ForkNode] result: branch='{}' success={} durationMs={} nexKeys={}",
+                    r.getBranchName(),
+                    r.isSuccess(),
+                    r.getDurationMs(),
+                    r.isSuccess() && r.getNex() != null ? r.getNex().keySet() : "n/a");
+        }
+        for (BranchResult r : results) {
+            branchPersistence.saveBranchExecution(
+                    executionId,
+                    forkNodeId,
+                    r.getBranchName(),
+                    r.getStatus(),
+                    r.getDurationMs(),
+                    r.isSuccess() ? r.getNex() : null,
+                    r.getErrorMessage()
+            );
+        }
+        List<BranchExecution> savedRecords = branchRepo.findByExecutionIdAndForkNodeId(
+                UUID.fromString(executionId), forkNodeId);
+        log.info("[ForkNode] DB check — {} branch records found for this fork node (expected {})",
+                savedRecords.size(), totalBranches);
+        savedRecords.forEach(rec ->
+                log.info("[ForkNode] DB record: branch='{}' status={}",
+                        rec.getBranchName(), rec.getStatus())
+        );
+
         List<BranchResult> succeeded = results.stream().filter(BranchResult::isSuccess).toList();
         List<BranchResult> failures = results.stream().filter(BranchResult::isFailure).toList();
 
@@ -187,7 +217,6 @@ public class ForkNodeExecutor implements NodeExecutor {
 
                 log.error("[ForkNode] '{}' FAIL_FAST — failed branches: {}", node.getLabel(), errorSummary);
                 eventPublisher.nodeError(executionId, node.getId().toString(), errorSummary);
-                updateBranchRecords(dbBranches, results);
                 return failure(node, errorSummary);
             } else {
                 // CONTINUE — log but proceed with succeeded branches only
@@ -204,12 +233,23 @@ public class ForkNodeExecutor implements NodeExecutor {
                     node.getLabel(), waitForN, succeeded.size());
             eventPublisher.nodeError(executionId, node.getId().toString(),
                     "WAIT_N quorum not met: only " + succeeded.size() + " succeeded");
-            updateBranchRecords(dbBranches, results);
             return failure(node, "WAIT_N quorum not met");
         }
 
+        // For WAIT_N: merge the fastest N succeeded branches into nex; persist all results
+        List<BranchResult> toMerge = succeeded;
+        if (JoinStrategy.WAIT_N.equals(strategy)) {
+            if (succeeded.size() > waitForN) {
+                toMerge = succeeded.stream()
+                        .sorted(Comparator.comparingLong(BranchResult::getDurationMs))
+                        .limit(waitForN)
+                        .collect(Collectors.toList());
+            }
+            log.info("[ForkNode] WAIT_N={} quorum met — using {} branch(es)", waitForN, toMerge.size());
+        }
+
         // Merge successful branch outputs into parent nex
-        succeeded.forEach(r -> nco.getNex().put(r.getBranchName(), r.getNex()));
+        toMerge.forEach(r -> nco.getNex().put(r.getBranchName(), r.getNex()));
 
         // Write timing and status metadata under nex.join
         Map<String, Object> joinMeta = new LinkedHashMap<>();
@@ -226,8 +266,6 @@ public class ForkNodeExecutor implements NodeExecutor {
             joinMeta.put(r.getBranchName(), branchMeta);
         });
         nco.getNex().put("join", joinMeta);
-
-        updateBranchRecords(dbBranches, results);
 
         log.info("[ForkNode] '{}' completed — parallel={}ms branches={}",
                 node.getLabel(), totalParallelMs, branchNames);
@@ -371,59 +409,57 @@ public class ForkNodeExecutor implements NodeExecutor {
                 }
             }
             case WAIT_N -> {
-                int target = Math.min(waitForCount, futures.size());
-                List<BranchResult> collected = new ArrayList<>();
-                CountDownLatch latch = new CountDownLatch(target);
-                futures.forEach(f -> f.whenComplete((result, ex) -> {
-                    synchronized (collected) {
-                        if (collected.size() < target) {
-                            collected.add(result != null ? result
-                                    : BranchResult.failure("unknown", ex != null ? ex.getMessage() : "unknown", 0));
-                            latch.countDown();
+                // Proceed as soon as N branches succeed (or timeout). Cancel the rest; persist all with cancelled placeholders.
+                int target = Math.min(waitForCount, branchNames.size());
+                ConcurrentHashMap<String, BranchResult> resultsByBranch = new ConcurrentHashMap<>();
+                AtomicInteger successCount = new AtomicInteger(0);
+                CompletableFuture<Void> quorumReached = new CompletableFuture<>();
+
+                for (int i = 0; i < futures.size(); i++) {
+                    final int idx = i;
+                    String branchName = branchNames.get(idx);
+                    CompletableFuture<BranchResult> f = futures.get(idx);
+                    f.whenComplete((result, ex) -> {
+                        BranchResult r;
+                        if (result != null) {
+                            r = result;
+                        } else if (ex instanceof CancellationException) {
+                            r = BranchResult.cancelled(branchName);
+                        } else {
+                            r = BranchResult.failure(branchName, ex != null && ex.getMessage() != null ? ex.getMessage() : "unknown", 0);
                         }
+                        resultsByBranch.put(branchName, r);
+                        if (r.isSuccess() && successCount.incrementAndGet() >= target) {
+                            quorumReached.complete(null);
+                        }
+                    });
+                }
+
+                try {
+                    quorumReached.get(timeoutSeconds, TimeUnit.SECONDS);
+                } catch (TimeoutException e) {
+                    if (!continuePartial) {
+                        throw new RuntimeException(
+                                "Fork WAIT_N timed out after " + timeoutSeconds + "s waiting for " + target + " branches to succeed");
                     }
-                }));
-                boolean reached = latch.await(timeoutSeconds, TimeUnit.SECONDS);
-                if (!reached && !continuePartial) {
-                    throw new RuntimeException(
-                            "Fork timed out waiting for " + target + " branches to complete");
+                    log.warn("[ForkNode] WAIT_N timeout after {}s — collecting completed futures", timeoutSeconds);
                 }
                 cancelAllFutures(futures);
-                return collected;
+                // Wait briefly for cancelled futures to finish so we can collect their final state
+                try {
+                    CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(5, TimeUnit.SECONDS);
+                } catch (Exception ignored) {
+                    // use whatever we have in resultsByBranch
+                }
+                // Build list in branch order; use CANCELLED for any branch not yet in map
+                List<BranchResult> results = new ArrayList<>();
+                for (String name : branchNames) {
+                    results.add(resultsByBranch.getOrDefault(name, BranchResult.cancelled(name)));
+                }
+                return results;
             }
             default -> throw new IllegalArgumentException("Unknown strategy: " + strategy);
         }
-    }
-
-    private BranchExecution createBranchRecord(String executionId, UUID forkNodeId, String branchName) {
-        BranchExecution b = new BranchExecution();
-        b.setExecutionId(UUID.fromString(executionId));
-        b.setForkNodeId(forkNodeId);
-        b.setBranchName(branchName);
-        b.setStatus(BranchExecutionStatus.PENDING);
-        return branchRepo.save(b);
-    }
-
-    private void updateBranchRecords(List<BranchExecution> dbBranches, List<BranchResult> results) {
-        Map<String, BranchResult> byName = results.stream()
-                .collect(Collectors.toMap(BranchResult::getBranchName, r -> r));
-
-        dbBranches.forEach(db -> {
-            BranchResult r = byName.get(db.getBranchName());
-            if (r == null) {
-                return;
-            }
-            db.setStatus(r.getStatus());
-            db.setDurationMs(r.getDurationMs());
-            db.setCompletedAt(LocalDateTime.now());
-            if (r.isSuccess()) {
-                db.setNexSnapshot(r.getNex());
-            }
-            if (r.getErrorMessage() != null) {
-                db.setErrorMessage(r.getErrorMessage());
-            }
-            branchRepo.save(db);
-        });
     }
 
     private void cancelAllFutures(List<CompletableFuture<BranchResult>> futures) {

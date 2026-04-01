@@ -1,0 +1,46 @@
+name: Deploy to EC2 (Docker Compose)
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout full repo ─────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. SSH → pull latest code → rebuild changed services ──
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          script_stop: true
+          script: |
+            set -euo pipefail
+
+            REPO_DIR="/home/${{ secrets.EC2_USER }}/nexflow-backend"
+
+            echo "==> Pulling latest code..."
+            cd "$REPO_DIR"
+            git pull origin master
+
+            echo "==> Rebuilding and restarting containers..."
+            docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
+
+            echo "==> Cleaning up old images..."
+            docker image prune -f
+
+            echo "==> Health check..."
+            sleep 8
+            curl -sf http://localhost:8090/api/assistant/health \
+              && echo "Backend healthy" \
+              || echo "WARNING: backend health check failed"

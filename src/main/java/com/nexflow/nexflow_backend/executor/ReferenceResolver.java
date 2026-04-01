@@ -286,12 +286,12 @@ public class ReferenceResolver {
                 if (current == null) return null;
                 int idx = Integer.parseInt(idxStr);
 
-                if (current instanceof List<?> list) {
-                    if (idx < 0 || idx >= list.size()) {
+                if (current instanceof List<?> innerList) {
+                    if (idx < 0 || idx >= innerList.size()) {
                         // Out-of-bounds index — treat as missing
                         return null;
                     }
-                    current = list.get(idx);
+                    current = innerList.get(idx);
                 } else {
                     // Bracket used on non-List value — invalid structure
                     return null;

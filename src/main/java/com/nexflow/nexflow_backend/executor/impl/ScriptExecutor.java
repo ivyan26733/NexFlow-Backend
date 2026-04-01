@@ -67,13 +67,9 @@ public class ScriptExecutor implements NodeExecutor {
 
         if (result.success()) {
             Object output = result.output();
-            // Treat null or { result: null } as failure so the flow can route to the failure edge
-            if (isNullOrEmptyResult(output)) {
-                return failure(nodeId,
-                    "Script returned null or no value. Return a non-null value for success, or throw an error to fail.");
-            }
+            // Treat null or empty result as SUCCESS with empty output (side-effect-only scripts)
             Map<String, Object> successOutput = new LinkedHashMap<>();
-            successOutput.put("result",   output);
+            successOutput.put("result",   output != null && !isNullOrEmptyResult(output) ? output : null);
             successOutput.put("language", language);
 
             return NodeContext.builder()

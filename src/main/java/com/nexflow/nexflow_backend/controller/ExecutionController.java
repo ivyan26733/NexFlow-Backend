@@ -1,8 +1,12 @@
 package com.nexflow.nexflow_backend.controller;
 
+import com.nexflow.nexflow_backend.model.domain.BranchExecution;
 import com.nexflow.nexflow_backend.model.domain.Execution;
 import com.nexflow.nexflow_backend.model.domain.Flow;
+import com.nexflow.nexflow_backend.model.domain.NodeExecution;
+import com.nexflow.nexflow_backend.repository.BranchExecutionRepository;
 import com.nexflow.nexflow_backend.repository.ExecutionRepository;
+import com.nexflow.nexflow_backend.repository.NodeExecutionRepository;
 import com.nexflow.nexflow_backend.repository.FlowRepository;
 import com.nexflow.nexflow_backend.service.FlowService;
 import lombok.RequiredArgsConstructor;
@@ -24,6 +28,8 @@ public class ExecutionController {
 
     private final ExecutionRepository executionRepository;
     private final FlowRepository      flowRepository;
+    private final BranchExecutionRepository branchExecutionRepository;
+    private final NodeExecutionRepository nodeExecutionRepository;
     private final FlowService         flowService;
 
     // GET /api/executions — full history across all flows, newest first
@@ -53,7 +59,9 @@ public class ExecutionController {
                             .map(Flow::getName).orElse("Unknown");
                     String flowSlug = flowRepository.findById(e.getFlowId())
                             .map(Flow::getSlug).orElse("");
-                    return ResponseEntity.ok(toDetail(e, flowName, flowSlug));
+                    List<BranchExecution> branches = branchExecutionRepository.findByExecutionId(id);
+                    List<NodeExecution> nodeExecutions = nodeExecutionRepository.findByExecutionIdOrderByStartedAtAsc(id);
+                    return ResponseEntity.ok(toDetail(e, flowName, flowSlug, branches, nodeExecutions));
                 })
                 .orElse(ResponseEntity.notFound().build());
     }
@@ -121,7 +129,8 @@ public class ExecutionController {
     }
     
 
-    private ExecutionDetail toDetail(Execution e, String flowName, String flowSlug) {
+    private ExecutionDetail toDetail(Execution e, String flowName, String flowSlug,
+                                     List<BranchExecution> branches, List<NodeExecution> nodeExecutions) {
         long durationMs = (e.getCompletedAt() != null && e.getStartedAt() != null)
                 ? Duration.between(e.getStartedAt(), e.getCompletedAt()).toMillis()
                 : -1;
@@ -136,7 +145,9 @@ public class ExecutionController {
                 e.getStartedAt() != null ? e.getStartedAt().toString() : null,
                 e.getCompletedAt() != null ? e.getCompletedAt().toString() : null,
                 durationMs,
-                e.getNcoSnapshot()  // full NCO — contains all node inputs/outputs
+                e.getNcoSnapshot(),  // full NCO — contains all node inputs/outputs
+                branches != null ? branches : List.of(),
+                nodeExecutions != null ? nodeExecutions : List.of()
         );
     }
 
@@ -153,15 +164,17 @@ public class ExecutionController {
     ) {}
 
     public record ExecutionDetail(
-            String              id,
-            String              flowId,
-            String              flowName,
-            String              flowSlug,
-            String              status,
-            String              triggeredBy,
-            String              startedAt,
-            String              completedAt,
-            long                durationMs,
-            Map<String, Object> ncoSnapshot  // raw NCO for full node I/O inspection
+            String                id,
+            String                flowId,
+            String                flowName,
+            String                flowSlug,
+            String                status,
+            String                triggeredBy,
+            String                startedAt,
+            String                completedAt,
+            long                  durationMs,
+            Map<String, Object>   ncoSnapshot,   // raw NCO for full node I/O inspection
+            List<BranchExecution> branches,      // per-fork branch execution records for transaction UI
+            List<NodeExecution>   nodeExecutions // branch node runs with inputNex/outputNex for request/response
     ) {}
 }
