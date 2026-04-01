@@ -27,7 +27,7 @@ jobs:
           script: |
             set -euo pipefail
 
-            REPO_DIR="/home/${{ secrets.EC2_USER }}/nexflow-backend"
+            REPO_DIR="/home/ec2-user/nexflow-backend"
 
             echo "==> Pulling latest code..."
             cd "$REPO_DIR"
