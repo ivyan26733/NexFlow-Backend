@@ -23,7 +23,16 @@ public class NodeExecutionPersistenceService {
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void save(NodeExecution source) {
-        NodeExecution record = new NodeExecution();
+        // Reuse an existing record for the same (executionId, nodeId, branchName) so that
+        // a terminal update (SUCCESS/FAILURE) overwrites the initial RUNNING stub instead
+        // of creating a duplicate row.
+        NodeExecution record = nodeExecutionRepository
+                .findFirstByExecutionIdAndNodeIdAndBranchName(
+                        source.getExecutionId(),
+                        source.getNodeId(),
+                        source.getBranchName())
+                .orElseGet(NodeExecution::new);
+
         record.setExecutionId(source.getExecutionId());
         record.setNodeId(source.getNodeId());
         record.setNodeLabel(source.getNodeLabel());

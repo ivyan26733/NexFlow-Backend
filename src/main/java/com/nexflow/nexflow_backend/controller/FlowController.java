@@ -1,16 +1,15 @@
 package com.nexflow.nexflow_backend.controller;
 
 import com.nexflow.nexflow_backend.EdgeCondition;
-import com.nexflow.nexflow_backend.model.domain.Execution;
-import com.nexflow.nexflow_backend.model.domain.Flow;
-import com.nexflow.nexflow_backend.model.domain.FlowEdge;
-import com.nexflow.nexflow_backend.model.domain.FlowNode;
+import com.nexflow.nexflow_backend.model.domain.*;
 import com.nexflow.nexflow_backend.model.dto.CanvasSaveDto;
 import com.nexflow.nexflow_backend.model.dto.FlowEdgeDto;
 import com.nexflow.nexflow_backend.model.dto.FlowNodeDto;
 import com.nexflow.nexflow_backend.repository.*;
+import com.nexflow.nexflow_backend.service.GroupService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
@@ -29,14 +28,21 @@ public class FlowController {
     private final FlowNodeRepository nodeRepository;
     private final FlowEdgeRepository edgeRepository;
     private final ExecutionRepository executionRepository;
+    private final GroupService groupService;
 
     @GetMapping
-    public List<Flow> getAllFlows() {
-        return flowRepository.findAll();
+    public List<Flow> getAllFlows(@AuthenticationPrincipal NexUser user) {
+        List<Flow> all = flowRepository.findAll();
+        if (user == null || user.getRole() == UserRole.ADMIN) return all;
+        return all.stream()
+                .filter(f -> groupService.hasFlowAccess(f.getId(), f.getUserId(), user))
+                .toList();
     }
 
     @PostMapping
-    public Flow createFlow(@RequestBody Flow flow) {
+    public ResponseEntity<Flow> createFlow(@RequestBody Flow flow, @AuthenticationPrincipal NexUser user) {
+        if (user == null) return ResponseEntity.status(401).build();
+        flow.setUserId(user.getId());
         if (flow.getSlug() == null || flow.getSlug().isBlank()) {
             flow.setSlug(toSlug(flow.getName()));
         }
@@ -45,7 +51,7 @@ public class FlowController {
         while (flowRepository.existsBySlug(flow.getSlug())) {
             flow.setSlug(base + "-" + counter++);
         }
-        return flowRepository.save(flow);
+        return ResponseEntity.ok(flowRepository.save(flow));
     }
 
     /** "Auth Service" → "auth-service" */
@@ -60,29 +66,31 @@ public class FlowController {
     }
 
     @GetMapping("/{flowId}")
-    public ResponseEntity<Flow> getFlow(@PathVariable UUID flowId) {
+    public ResponseEntity<Flow> getFlow(@PathVariable UUID flowId,
+                                         @AuthenticationPrincipal NexUser user) {
         return flowRepository.findById(flowId)
+                .filter(f -> user == null || groupService.hasFlowAccess(f.getId(), f.getUserId(), user))
                 .map(this::ensureSlug)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
     }
 
     @PutMapping("/{flowId}")
-    public ResponseEntity<Flow> updateFlow(@PathVariable UUID flowId, @RequestBody Map<String, String> body) {
-        if (body == null || !body.containsKey("name")) {
-            return ResponseEntity.badRequest().build();
-        }
+    public ResponseEntity<Flow> updateFlow(@PathVariable UUID flowId,
+                                            @RequestBody Map<String, String> body,
+                                            @AuthenticationPrincipal NexUser user) {
+        if (user == null) return ResponseEntity.status(401).build();
+        if (body == null || !body.containsKey("name")) return ResponseEntity.badRequest().build();
         String name = body.get("name");
-        if (name == null || name.isBlank()) {
-            return ResponseEntity.badRequest().build();
-        }
+        if (name == null || name.isBlank()) return ResponseEntity.badRequest().build();
         return flowRepository.findById(flowId)
+                .filter(f -> isOwnerOrAdmin(f, user))
                 .map(flow -> {
                     flow.setName(name.trim());
                     return flowRepository.save(flow);
                 })
                 .map(ResponseEntity::ok)
-                .orElse(ResponseEntity.notFound().build());
+                .orElse(ResponseEntity.status(403).build());
     }
 
     /** Backfill slug if missing so trigger-by-slug works for flows created before slug was required. */
@@ -104,7 +112,12 @@ public class FlowController {
     @PostMapping("/{flowId}/canvas")
     public ResponseEntity<?> saveCanvas(
             @PathVariable UUID flowId,
-            @RequestBody CanvasSaveDto dto) {
+            @RequestBody CanvasSaveDto dto,
+            @AuthenticationPrincipal NexUser user) {
+        if (user == null) return ResponseEntity.status(401).build();
+        Flow flow = flowRepository.findById(flowId).orElse(null);
+        if (flow == null) return ResponseEntity.notFound().build();
+        if (!isOwnerOrAdmin(flow, user)) return ResponseEntity.status(403).build();
 
         String saveOutputAsError = validateSaveOutputAs(dto.nodes());
         if (saveOutputAsError != null) {
@@ -223,15 +236,26 @@ public class FlowController {
      */
     @Transactional
     @DeleteMapping("/{flowId}")
-    public ResponseEntity<Void> deleteFlow(@PathVariable UUID flowId) {
-        if (flowRepository.findById(flowId).isEmpty()) {
-            return ResponseEntity.notFound().build();
-        }
+    public ResponseEntity<Void> deleteFlow(@PathVariable UUID flowId,
+                                            @AuthenticationPrincipal NexUser user) {
+        if (user == null) return ResponseEntity.status(401).build();
+        Flow flow = flowRepository.findById(flowId).orElse(null);
+        if (flow == null) return ResponseEntity.notFound().build();
+        if (!isOwnerOrAdmin(flow, user)) return ResponseEntity.status(403).build();
+
         executionRepository.deleteAll(executionRepository.findByFlowIdOrderByStartedAtDesc(flowId));
         nodeRepository.deleteAll(nodeRepository.findByFlowId(flowId));
         edgeRepository.deleteAll(edgeRepository.findByFlowId(flowId));
         flowRepository.deleteById(flowId);
         return ResponseEntity.noContent().build();
+    }
+
+    /** Returns true if the user is the flow owner or has ADMIN role. */
+    private static boolean isOwnerOrAdmin(Flow flow, NexUser user) {
+        if (user.getRole() == UserRole.ADMIN) return true;
+        // Flows with no owner (pre-auth legacy) are editable by any authenticated user
+        if (flow.getUserId() == null) return true;
+        return flow.getUserId().equals(user.getId());
     }
 
     /** Response type for GET canvas; also used internally for the saved entities. */

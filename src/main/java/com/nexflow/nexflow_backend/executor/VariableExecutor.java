@@ -43,7 +43,13 @@ public class VariableExecutor implements NodeExecutor {
         Map<String, Object> output = new HashMap<>();
         resolved.forEach((key, value) -> output.put(key, normalizeVariableValue(value)));
 
-        // Optional: save to nex for {{nex.NAME}} (scalar when single variable, else whole map)
+        // Always spread every variable directly into nex for flat access:
+        // {{nex.userId}}, {{nex.discount}}, etc.  putIfAbsent so trigger body fields set earlier are not clobbered.
+        if (nco.getNex() != null) {
+            output.forEach((k, v) -> nco.getNex().put(k, v));
+        }
+
+        // Optional named group: save entire output map (or scalar) under a single key
         String saveAs = extractSaveOutputAs(node);
         if (saveAs != null && !saveAs.isBlank()) {
             String key = saveAs.trim();

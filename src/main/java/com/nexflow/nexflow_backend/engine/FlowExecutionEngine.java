@@ -31,6 +31,7 @@ import java.util.Objects;
 import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -137,21 +138,25 @@ public class FlowExecutionEngine {
                 if (!current.getId().equals(startNode.getId())) {
                     nco.setNodeOutput(current.getId().toString(), result);
                     nco.setNodeAlias(toLabelKey(current.getLabel()), result);
-                    // Check if this node wants to save output into nex (skip VARIABLE/LOOP — they handle nex themselves where needed)
+                    // Auto-populate nex for every non-VARIABLE, non-LOOP node so downstream nodes
+                    // can access output via {{nex.nodeLabelCamelCase.field}} or nex.nodeLabelCamelCase in scripts.
+                    // VARIABLE nodes populate nex themselves (flat variable spread).
                     if (current.getNodeType() != NodeType.VARIABLE && current.getNodeType() != NodeType.LOOP) {
-                        String saveAs = extractSaveOutputAs(current);
-                        if (saveAs != null && !saveAs.isBlank()) {
-                            String key = saveAs.trim();
-                            if (key.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
-                                Object valueForNex = result.getSuccessOutput() != null ? result.getSuccessOutput() : result.getOutput();
-                                if (valueForNex != null) {
-                                    if (nco.getNex().containsKey(key)) {
-                                        log.warn("saveOutputAs '{}' on node '{}' overwrites existing nex entry from an earlier node.", key, current.getLabel());
-                                    }
+                        Object valueForNex = result.getSuccessOutput() != null ? result.getSuccessOutput() : result.getOutput();
+                        if (valueForNex != null) {
+                            // 1. Auto-add under camelCase label (putIfAbsent — explicit saveOutputAs key takes priority)
+                            String labelKey = toLabelKey(current.getLabel());
+                            nco.getNex().putIfAbsent(labelKey, valueForNex);
+
+                            // 2. Explicit "Save output as" — always overwrites so the user's chosen name wins
+                            String saveAs = extractSaveOutputAs(current);
+                            if (saveAs != null && !saveAs.isBlank()) {
+                                String key = saveAs.trim();
+                                if (key.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
                                     nco.getNex().put(key, valueForNex);
+                                } else {
+                                    log.warn("saveOutputAs value '{}' on node '{}' is not a valid key. Only letters, numbers, underscore allowed. Skipping.", key, current.getLabel());
                                 }
-                            } else {
-                                log.warn("saveOutputAs value '{}' on node '{}' is not a valid key. Only letters, numbers, underscore allowed. Skipping.", key, current.getLabel());
                             }
                         }
                     }
@@ -221,11 +226,20 @@ public class FlowExecutionEngine {
                 boolean allNextAreBranchNodesOnly = nextNodes.stream()
                         .allMatch(next -> branchOnlyExecutedNodeIds.contains(next.getId()));
                 if (allNextAreBranchNodesOnly) {
-                    for (FlowNode branchNode : nextNodes) {
+                    // BFS through already-executed branch-only nodes to find the first non-executed successor (e.g. JOIN).
+                    // One-hop is insufficient for multi-node branches where entry node → intermediate branch nodes → JOIN.
+                    Set<UUID> visitedForward = new HashSet<>();
+                    Queue<FlowNode> forwardQueue = new LinkedList<>(nextNodes);
+                    while (!forwardQueue.isEmpty()) {
+                        FlowNode branchNode = forwardQueue.poll();
+                        if (!visitedForward.add(branchNode.getId())) continue;
                         List<FlowNode> afterBranch = resolveNextNodes(branchNode, NodeStatus.SUCCESS, allEdges, allNodes);
                         for (FlowNode n : afterBranch) {
                             if (!executedNodeIds.contains(n.getId()) && toEnqueue.stream().noneMatch(x -> x.getId().equals(n.getId()))) {
                                 toEnqueue.add(n);
+                            } else if (branchOnlyExecutedNodeIds.contains(n.getId()) && !visitedForward.contains(n.getId())) {
+                                // This is another branch node; keep traversing toward JOIN
+                                forwardQueue.add(n);
                             }
                         }
                     }
@@ -312,14 +326,19 @@ public class FlowExecutionEngine {
                 branchNco.setNodeOutput(node.getId().toString(), result);
                 branchNco.setNodeAlias(toLabelKey(node.getLabel()), result);
 
-                // Merge node output into branch nex when saveOutputAs is set (so Script/AI etc. output appears in branch nex)
+                // Auto-populate branch nex for every non-VARIABLE, non-LOOP node
                 if (result.getStatus() != NodeStatus.FAILURE && node.getNodeType() != NodeType.VARIABLE && node.getNodeType() != NodeType.LOOP) {
-                    String saveAs = extractSaveOutputAs(node);
-                    if (saveAs != null && !saveAs.isBlank()) {
-                        String key = saveAs.trim();
-                        if (key.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
-                            Object valueForNex = result.getSuccessOutput() != null ? result.getSuccessOutput() : result.getOutput();
-                            if (valueForNex != null) {
+                    Object valueForNex = result.getSuccessOutput() != null ? result.getSuccessOutput() : result.getOutput();
+                    if (valueForNex != null) {
+                        // 1. Auto-add under camelCase label
+                        String labelKey = toLabelKey(node.getLabel());
+                        branchNco.getNex().putIfAbsent(labelKey, valueForNex);
+
+                        // 2. Explicit saveOutputAs (overwrites)
+                        String saveAs = extractSaveOutputAs(node);
+                        if (saveAs != null && !saveAs.isBlank()) {
+                            String key = saveAs.trim();
+                            if (key.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
                                 branchNco.getNex().put(key, valueForNex);
                             }
                         }
@@ -515,9 +534,15 @@ public class FlowExecutionEngine {
                 .build();
         nco.setNodeOutput(startNode.getId().toString(), startCtx);
         nco.setNodeAlias("start", startCtx);
-        // Always expose trigger payload under nex.start so input.nex.start.body.* works in Script/Mapper nodes
+
+        // nex.start — full trigger output {body: {...}} for backward compat ({{nex.start.body.field}})
         nco.getNex().putIfAbsent("start", output);
-        // If START node has "Save output as", put trigger payload in nex so input.nex.start works in child flows
+
+        // Also spread every top-level trigger body field directly into nex for flat access:
+        // {{nex.userId}}, {{nex.orderId}}, etc. putIfAbsent so explicit saveOutputAs on a node is never clobbered.
+        body.forEach((k, v) -> nco.getNex().putIfAbsent(k, v));
+
+        // If START node has "Save output as", put trigger payload in nex under that key
         String saveAs = extractSaveOutputAs(startNode);
         if (saveAs != null && !saveAs.isBlank()) {
             String key = saveAs.trim();
@@ -545,12 +570,6 @@ public class FlowExecutionEngine {
     }
 
     /**
-     * For each FORK node, if config.branchNodeIds is missing or empty, derive it from edges:
-     * any edge from this FORK with a non-blank sourceHandle (branch name) adds the target node to that branch.
-     * This covers flows where the user connected nodes from the FORK's branch handles but branchNodeIds
-     * was not persisted (e.g. save/load quirk or older flow).
-     */
-    /**
      * Adds all node IDs that were executed inside the FORK's branches to executedNodeIds and branchOnlyExecutedNodeIds.
      * This prevents the main loop from re-running those nodes when it reaches the JOIN, and allows us to treat
      * "JOIN's next are only these branch nodes" as normal completion (not a loop).
@@ -573,7 +592,31 @@ public class FlowExecutionEngine {
         }
     }
 
+    /**
+     * Ensures each FORK node has complete branchNodeIds for execution.
+     *
+     * Strategy per branch:
+     * - If the branch already has a non-empty node list saved (by the frontend), keep it.
+     *   The frontend cascade correctly builds this list; we trust it.
+     * - If the branch has NO nodes (empty list or missing), derive them via BFS from the
+     *   branch handle's entry edge, stopping at JOIN/FORK/SUCCESS/FAILURE boundaries.
+     *   This covers flows saved before the cascade UI existed or where the user skipped saving.
+     *
+     * SUCCESS and FAILURE terminal nodes are excluded from branch lists — they are main-flow
+     * terminals and must run on the main engine thread after JOIN, not inside branches.
+     */
+    @SuppressWarnings("unchecked")
     private void ensureForkBranchNodeIdsFromEdges(List<FlowNode> allNodes, List<FlowEdge> allEdges) {
+        Map<UUID, FlowNode> nodeById = allNodes.stream()
+                .collect(Collectors.toMap(FlowNode::getId, n -> n));
+
+        // Pre-build outgoing adjacency so BFS is O(nodes+edges) not O(nodes*edges)
+        Map<UUID, List<UUID>> outgoing = new HashMap<>();
+        for (FlowEdge e : allEdges) {
+            outgoing.computeIfAbsent(e.getSourceNodeId(), k -> new ArrayList<>())
+                    .add(e.getTargetNodeId());
+        }
+
         for (FlowNode node : allNodes) {
             if (node.getNodeType() != NodeType.FORK) continue;
 
@@ -583,28 +626,109 @@ public class FlowExecutionEngine {
                 node.setConfig(config);
             }
 
-            Object raw = config.get("branchNodeIds");
-            if (raw instanceof Map<?, ?> existing) {
-                boolean hasAnyNodes = existing.values().stream()
-                        .anyMatch(v -> v instanceof List<?> l && !l.isEmpty());
-                if (hasAnyNodes) continue; // already has branch nodes configured
+            // Read existing branchNodeIds (may have been set by frontend and persisted in DB)
+            Map<String, List<String>> existingBranchNodeIds = null;
+            Object rawExisting = config.get("branchNodeIds");
+            if (rawExisting instanceof Map<?, ?>) {
+                existingBranchNodeIds = (Map<String, List<String>>) rawExisting;
             }
 
-            // Derive from edges: sourceNodeId = this FORK, sourceHandle = branch name
-            Map<String, List<String>> derived = new LinkedHashMap<>();
+            boolean anyBranchUpdated = false;
+            Map<String, List<String>> merged = existingBranchNodeIds != null
+                    ? new LinkedHashMap<>(existingBranchNodeIds)
+                    : new LinkedHashMap<>();
+
             for (FlowEdge e : allEdges) {
                 if (!e.getSourceNodeId().equals(node.getId())) continue;
                 String handle = e.getSourceHandle();
                 if (handle == null || handle.isBlank()) continue;
-                derived.computeIfAbsent(handle.trim(), k -> new ArrayList<>()).add(e.getTargetNodeId().toString());
+                String branchKey = handle.trim();
+
+                // If this branch already has nodes, trust the frontend — skip BFS for it
+                List<String> existing = merged.get(branchKey);
+                if (existing != null && !existing.isEmpty()) continue;
+
+                // Branch is empty/missing — derive via BFS
+                List<String> bfsDerived = bfsForBranchEntry(e.getTargetNodeId(), nodeById, outgoing);
+                if (!bfsDerived.isEmpty()) {
+                    merged.put(branchKey, bfsDerived);
+                    anyBranchUpdated = true;
+                }
             }
-            if (!derived.isEmpty()) {
-                config.put("branchNodeIds", derived);
-                log.info("[FlowExecutionEngine] Derived branchNodeIds for FORK '{}' from {} edges: {}",
-                        node.getLabel(), allEdges.stream().filter(e -> e.getSourceNodeId().equals(node.getId())).count(),
-                        derived.keySet());
+
+            // Second pass: some edges from FORK may have been saved with null/blank sourceHandle
+            // (e.g. when a branch is added in Studio but the handle wasn't persisted).
+            // Assign them in order to branch names that still have no entry nodes.
+            @SuppressWarnings("unchecked")
+            List<String> allBranchNames = (List<String>) config.getOrDefault("branches", List.of());
+            List<String> unmatchedBranches = allBranchNames.stream()
+                    .filter(b -> !merged.containsKey(b) || merged.get(b).isEmpty())
+                    .collect(Collectors.toList());
+
+            if (!unmatchedBranches.isEmpty()) {
+                List<FlowEdge> nullHandleEdges = allEdges.stream()
+                        .filter(e -> e.getSourceNodeId().equals(node.getId()))
+                        .filter(e -> { String h = e.getSourceHandle(); return h == null || h.isBlank(); })
+                        .collect(Collectors.toList());
+
+                for (int i = 0; i < Math.min(unmatchedBranches.size(), nullHandleEdges.size()); i++) {
+                    String branchName = unmatchedBranches.get(i);
+                    FlowEdge e = nullHandleEdges.get(i);
+                    List<String> derived = bfsForBranchEntry(e.getTargetNodeId(), nodeById, outgoing);
+                    if (!derived.isEmpty()) {
+                        merged.put(branchName, derived);
+                        anyBranchUpdated = true;
+                        log.warn("[FlowExecutionEngine] FORK '{}' edge to '{}' has no sourceHandle — " +
+                                "assigned to unmatched branch '{}' (fix in Studio: set branch handle on the edge).",
+                                node.getLabel(),
+                                nodeById.containsKey(e.getTargetNodeId())
+                                        ? nodeById.get(e.getTargetNodeId()).getLabel() : e.getTargetNodeId(),
+                                branchName);
+                    }
+                }
+            }
+
+            if (anyBranchUpdated) {
+                config.put("branchNodeIds", merged);
+                log.info("[FlowExecutionEngine] BFS filled missing branch nodes for FORK '{}': {}",
+                        node.getLabel(),
+                        merged.entrySet().stream()
+                                .map(en -> en.getKey() + "=" + en.getValue().size() + " node(s)")
+                                .collect(Collectors.joining(", ")));
             }
         }
+    }
+
+    /**
+     * BFS from a branch entry node collecting all reachable nodes,
+     * stopping (but not including) JOIN, FORK, SUCCESS, and FAILURE boundaries.
+     */
+    private List<String> bfsForBranchEntry(UUID startId, Map<UUID, FlowNode> nodeById, Map<UUID, List<UUID>> outgoing) {
+        List<String> result = new ArrayList<>();
+        Queue<UUID> bfsQueue = new LinkedList<>();
+        Set<UUID> visited = new HashSet<>();
+        bfsQueue.add(startId);
+
+        while (!bfsQueue.isEmpty()) {
+            UUID curr = bfsQueue.poll();
+            if (visited.contains(curr)) continue;
+            visited.add(curr);
+
+            FlowNode currNode = nodeById.get(curr);
+            if (currNode == null) continue;
+            // Stop at boundaries — these run on the main thread, not inside branches
+            if (currNode.getNodeType() == NodeType.JOIN
+                    || currNode.getNodeType() == NodeType.FORK
+                    || currNode.getNodeType() == NodeType.SUCCESS
+                    || currNode.getNodeType() == NodeType.FAILURE) continue;
+
+            result.add(curr.toString());
+
+            for (UUID next : outgoing.getOrDefault(curr, List.of())) {
+                if (!visited.contains(next)) bfsQueue.add(next);
+            }
+        }
+        return result;
     }
 
     private FlowNode findStartNodeOrCreateDefault(List<FlowNode> nodes, UUID flowId) {

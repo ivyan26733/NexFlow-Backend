@@ -80,6 +80,12 @@ public class NexusConnector {
     @Column(name = "db_password")
     private String dbPassword;
 
+    // ── Ownership ──────────────────────────────────────────────────────────────
+
+    /** The user who created this connector. Null for legacy connectors (accessible to all authenticated users). */
+    @Column(name = "user_id")
+    private UUID userId;
+
     // ── Audit ──────────────────────────────────────────────────────────────────
 
     @Column(name = "created_at")

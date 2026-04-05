@@ -1,20 +1,20 @@
 package com.nexflow.nexflow_backend.controller;
 
-import com.nexflow.nexflow_backend.model.domain.BranchExecution;
-import com.nexflow.nexflow_backend.model.domain.Execution;
-import com.nexflow.nexflow_backend.model.domain.Flow;
-import com.nexflow.nexflow_backend.model.domain.NodeExecution;
+import com.nexflow.nexflow_backend.model.domain.*;
 import com.nexflow.nexflow_backend.repository.BranchExecutionRepository;
 import com.nexflow.nexflow_backend.repository.ExecutionRepository;
 import com.nexflow.nexflow_backend.repository.NodeExecutionRepository;
 import com.nexflow.nexflow_backend.repository.FlowRepository;
 import com.nexflow.nexflow_backend.service.FlowService;
+import com.nexflow.nexflow_backend.service.GroupService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -31,12 +31,18 @@ public class ExecutionController {
     private final BranchExecutionRepository branchExecutionRepository;
     private final NodeExecutionRepository nodeExecutionRepository;
     private final FlowService         flowService;
+    private final GroupService        groupService;
 
-    // GET /api/executions — full history across all flows, newest first
+    // GET /api/executions — full history, scoped to the requesting user's accessible flows
     @GetMapping
-    public List<ExecutionSummary> listAll() {
-
-        List<Execution> executions = executionRepository.findAllByOrderByStartedAtDesc();
+    public List<ExecutionSummary> listAll(@AuthenticationPrincipal NexUser user) {
+        List<Execution> executions;
+        if (user != null && user.getRole() == UserRole.ADMIN) {
+            executions = executionRepository.findAllByOrderByStartedAtDesc();
+        } else {
+            List<UUID> accessibleFlowIds = getAccessibleFlowIds(user);
+            executions = executionRepository.findByFlowIdInOrderByStartedAtDesc(accessibleFlowIds);
+        }
 
     List<UUID> flowIds = executions.stream()
             .map(Execution::getFlowId)
@@ -52,8 +58,10 @@ public class ExecutionController {
     }
     // GET /api/executions/{id} — full detail including NCO snapshot (all node I/O)
     @GetMapping("/{id}")
-    public ResponseEntity<ExecutionDetail> getById(@PathVariable UUID id) {
+    public ResponseEntity<ExecutionDetail> getById(@PathVariable UUID id,
+                                                    @AuthenticationPrincipal NexUser user) {
         return executionRepository.findById(id)
+                .filter(e -> canAccessExecution(e, user))
                 .map(e -> {
                     String flowName = flowRepository.findById(e.getFlowId())
                             .map(Flow::getName).orElse("Unknown");
@@ -84,6 +92,49 @@ public class ExecutionController {
     }
 
     /**
+     * GET /api/executions/recent?flowId={id}&hours=1
+     *
+     * Returns up to 10 recent executions for a flow within the last N hours,
+     * each with per-node execution summaries. Used by the AI Assistant to diagnose failures.
+     */
+    @GetMapping("/recent")
+    public List<TransactionDigest> getRecent(
+            @RequestParam UUID flowId,
+            @RequestParam(defaultValue = "1") int hours) {
+
+        Instant since = Instant.now().minusSeconds((long) hours * 3600);
+        List<Execution> executions = executionRepository
+                .findByFlowIdAndStartedAtAfterOrderByStartedAtDesc(flowId, since)
+                .stream().limit(10).toList();
+
+        return executions.stream().map(e -> {
+            List<NodeExecution> nodeExecs = nodeExecutionRepository
+                    .findByExecutionIdOrderByStartedAtAsc(e.getId());
+            List<NodeDigest> nodes = nodeExecs.stream().map(n -> new NodeDigest(
+                    n.getNodeLabel(),
+                    n.getNodeType(),
+                    n.getStatus().name(),
+                    n.getBranchName(),
+                    n.getErrorMessage(),
+                    n.getDurationMs() != null ? n.getDurationMs() : -1L
+            )).toList();
+
+            long durationMs = (e.getCompletedAt() != null && e.getStartedAt() != null)
+                    ? Duration.between(e.getStartedAt(), e.getCompletedAt()).toMillis() : -1;
+
+            return new TransactionDigest(
+                    e.getId().toString(),
+                    e.getStatus().name(),
+                    e.getStartedAt() != null ? e.getStartedAt().toString() : null,
+                    e.getCompletedAt() != null ? e.getCompletedAt().toString() : null,
+                    durationMs,
+                    e.getErrorMessage(),
+                    nodes
+            );
+        }).toList();
+    }
+
+    /**
      * POST /api/executions/{executionId}/start
      *
      * Called by the frontend AFTER it has confirmed its STOMP subscription
@@ -96,6 +147,24 @@ public class ExecutionController {
         log.info("[ExecutionController] start requested for executionId={}", executionId);
         flowService.startExecution(executionId);
         return ResponseEntity.accepted().build();
+    }
+
+    // ── Access helpers ────────────────────────────────────────────────────────
+
+    private List<UUID> getAccessibleFlowIds(NexUser user) {
+        if (user == null) return List.of();
+        return flowRepository.findAll().stream()
+                .filter(f -> groupService.hasFlowAccess(f.getId(), f.getUserId(), user))
+                .map(Flow::getId)
+                .toList();
+    }
+
+    private boolean canAccessExecution(Execution e, NexUser user) {
+        if (user == null) return false;
+        if (user.getRole() == UserRole.ADMIN) return true;
+        Flow flow = flowRepository.findById(e.getFlowId()).orElse(null);
+        if (flow == null) return false;
+        return groupService.hasFlowAccess(flow.getId(), flow.getUserId(), user);
     }
 
     // ── DTOs ─────────────────────────────────────────────────────────────────
@@ -161,6 +230,25 @@ public class ExecutionController {
             String startedAt,
             String completedAt,
             long   durationMs
+    ) {}
+
+    public record NodeDigest(
+            String label,
+            String type,
+            String status,
+            String branchName,
+            String errorMessage,
+            long   durationMs
+    ) {}
+
+    public record TransactionDigest(
+            String           id,
+            String           status,
+            String           startedAt,
+            String           completedAt,
+            long             durationMs,
+            String           errorMessage,
+            List<NodeDigest> nodes
     ) {}
 
     public record ExecutionDetail(

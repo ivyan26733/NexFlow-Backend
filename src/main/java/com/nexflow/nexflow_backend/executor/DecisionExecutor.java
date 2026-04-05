@@ -22,7 +22,7 @@ import java.util.Map;
  *   Config: { "left": "{{variables.amount}}", "operator": "GT", "right": "500" }
  *
  *   "code" — user writes a script that returns true/false
- *   Config: { "mode": "code", "language": "javascript", "code": "return input.variables.amount > 500" }
+ *   Config: { "mode": "code", "language": "javascript", "code": "return nex.amount > 500" }
  *
  * Result: SUCCESS edge if condition is true, FAILURE edge if false.
  */
@@ -110,9 +110,11 @@ public class DecisionExecutor implements NodeExecutor {
             return decisionResult(nodeId, false, "Decision node in code mode has no code written.", "code");
         }
 
-        // Reuse the same input shape as SCRIPT nodes for consistency
-        Map<String, Object> scriptInput = buildInput(nco);
-        ScriptRunner.ScriptResult result = scriptRunner.run(language, code, scriptInput);
+        // Same data shape as ScriptExecutor: { nex, input } for both new and legacy syntax
+        Map<String, Object> scriptData = new LinkedHashMap<>();
+        scriptData.put("nex",   nco.getNex() != null ? nco.getNex() : new java.util.LinkedHashMap<>());
+        scriptData.put("input", buildInput(nco));
+        ScriptRunner.ScriptResult result = scriptRunner.run(language, code, scriptData);
 
         if (!result.success()) {
             return decisionResult(nodeId, false, result.error(), "code");

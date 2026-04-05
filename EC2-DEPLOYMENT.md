@@ -51,8 +51,54 @@ ssh -i /c/Users/hpcnd/Downloads/ec2/newNexflow.pem ec2-user@43.204.28.197
 ├── nginx.conf
 ├── .env                  ← secrets (never commit this)
 ├── rabbitmq-config/
-└── src/
+├── src/
+└── nexflow-assistant/    ← AI agent service (Node.js)
+    ├── Dockerfile
+    ├── index.js
+    ├── agent.js
+    ├── assistant.js
+    ├── src/
+    └── ...
 ```
+
+> The `nexflow-assistant/` folder must be a sibling of `docker-compose.prod.yml` —
+> that is how `docker-compose.prod.yml` builds the `nexflow-agent` image.
+
+---
+
+## Uploading nexflow-assistant to EC2
+
+The `nexflow-assistant/` Node.js service lives in a separate folder locally.
+Copy it to EC2 next to the backend files:
+
+```bash
+# Run from your LOCAL machine (Git Bash / WSL)
+scp -i /c/Users/hpcnd/Downloads/ec2/newNexflow.pem -r \
+  /d/NexFlow/nexflow-assistant \
+  ec2-user@43.204.28.197:~/nexflow-backend/nexflow-assistant
+```
+
+After uploading, your EC2 `~/nexflow-backend/` should contain the
+`nexflow-assistant/` folder with its `Dockerfile` inside.
+
+---
+
+## AI Agent Environment Variables
+
+The `nexflow-agent` container reads its LLM keys from the same `.env` file.
+After copying `.env.example` to `.env`, fill in the AI section:
+
+```bash
+nano ~/nexflow-backend/.env
+```
+
+```
+LLM_PROVIDER=groq                        # groq | anthropic | gemini
+GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxx    # get free key at console.groq.com
+```
+
+Groq is the recommended default — it is free and fast.
+Set `LLM_PROVIDER=anthropic` and `ANTHROPIC_API_KEY=sk-ant-...` to use Claude instead.
 
 ---
 
@@ -91,6 +137,7 @@ docker logs nexflow-backend
 docker logs nexflow-postgres
 docker logs nexflow-rabbitmq
 docker logs nexflow-nginx
+docker logs nexflow-agent
 
 # Last 100 lines
 docker logs nexflow-backend --tail 100

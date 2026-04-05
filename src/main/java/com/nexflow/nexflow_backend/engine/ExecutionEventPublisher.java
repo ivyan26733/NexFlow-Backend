@@ -69,7 +69,11 @@ public class ExecutionEventPublisher {
             );
         }
 
-        messagingTemplate.convertAndSend(destination, payload);
+        try {
+            messagingTemplate.convertAndSend(destination, payload);
+        } catch (Exception e) {
+            log.warn("[ExecutionEventPublisher] broker unavailable, event dropped dest='{}': {}", destination, e.getMessage());
+        }
     }
 
     // ── Branch events ─────────────────────────────────────────────────────────
@@ -121,6 +125,10 @@ public class ExecutionEventPublisher {
             );
         }
 
-        messagingTemplate.convertAndSend(destination, payload);
+        try {
+            messagingTemplate.convertAndSend(destination, payload);
+        } catch (Exception e) {
+            log.warn("[ExecutionEventPublisher] broker unavailable, branch event dropped dest='{}': {}", destination, e.getMessage());
+        }
     }
 }

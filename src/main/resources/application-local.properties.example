@@ -6,4 +6,4 @@
 # Or set env vars instead: DB_USERNAME=postgres DB_PASSWORD=yourpassword
 
 spring.datasource.username=postgres
-spring.datasource.password=YOUR_LOCAL_POSTGRES_PASSWORD
+spring.datasource.password=321Ivyan!
