@@ -1,4 +1,4 @@
-# Nexflow Backend
+# NexFlow Backend
 
 A no-code workflow automation platform. Users build visual flows in **Studio**, connect API calls via **Nexus**, and fire them via **Pulse**.
 
@@ -9,17 +9,18 @@ A no-code workflow automation platform. Users build visual flows in **Studio**, 
 ```
 Postman / HTTP Client
         ↓
-   POST /api/pulse/{flowId}
+   POST /api/pulse/{flowSlug}
         ↓
    FlowService → creates Execution record
         ↓
-   FlowExecutionEngine → walks the DAG
+   FlowExecutionEngine → BFS-walks the DAG
         ↓
    NodeExecutorRegistry → dispatches each node
         ↓
-   WebSocket → Studio gets live node status updates
+   ExecutionEventPublisher → WebSocket (RabbitMQ STOMP)
+        → Studio gets live node status updates
         ↓
-   Execution saved to PostgreSQL
+   Execution + NodeExecution logs saved to PostgreSQL
 ```
 
 ---
@@ -28,8 +29,8 @@ Postman / HTTP Client
 
 | Pillar  | What it is |
 |---------|------------|
-| **Pulse**  | HTTP trigger that starts a flow. Hit from Postman or any client via `POST /api/pulse/{flowId}` |
-| **Nexus**  | Where users configure API calls (URL, method, headers, body) as reusable connector nodes |
+| **Pulse**  | HTTP trigger that starts a flow. Hit from any client via `POST /api/pulse/{flowSlug}` |
+| **Nexus**  | Where users configure reusable API connectors (URL, method, headers, body template) |
 | **Studio** | The visual canvas (frontend) where users drag, drop, and stitch nodes together |
 
 ---
@@ -39,10 +40,15 @@ Postman / HTTP Client
 | Node | Description |
 |------|-------------|
 | `START` | Entry point. Injected with the Pulse payload automatically |
-| `PULSE` | Fires an HTTP call. Has two outputs: `SUCCESS` and `FAILURE` |
-| `VARIABLE` | Defines static or referenced variables available to all subsequent nodes |
-| `MAPPER` | Shapes a new request payload by picking fields from any previous node output |
-| `DECISION` | Evaluates a condition (e.g. amount > 500). Routes `SUCCESS` or `FAILURE` edge |
+| `NEXUS` | Fires an HTTP call via a saved Nexus connector. Has `SUCCESS` and `FAILURE` outputs |
+| `VARIABLE` | Defines static or referenced variables available to all downstream nodes |
+| `MAPPER` | Shapes a new payload by picking and renaming fields from any previous node output |
+| `DECISION` | Evaluates a condition (e.g. `amount > 500`). Routes `SUCCESS` or `FAILURE` edge |
+| `SCRIPT` | Runs user-supplied JavaScript or Python in a sandboxed subprocess |
+| `FORK` | Splits execution into parallel branches |
+| `JOIN` | Waits for all branches to complete, then merges their outputs |
+| `AI` | Sends a prompt to a configured LLM provider (OpenAI, Gemini, etc.) |
+| `SUB_FLOW` | Executes another saved flow as a nested step |
 | `SUCCESS` | Terminal node. Marks flow as successful, returns a shaped response |
 | `FAILURE` | Terminal node. Marks flow as failed, returns error info |
 
@@ -50,7 +56,7 @@ Postman / HTTP Client
 1. Add `KAFKA_PRODUCER` to `NodeType` enum
 2. Create `KafkaProducerExecutor implements NodeExecutor`
 3. Annotate with `@Component` — the registry auto-picks it up
-4. No changes to the engine needed
+4. No changes to the engine or registry needed
 
 ---
 
@@ -74,23 +80,75 @@ The NCO is a shared data envelope that travels through the entire flow. Every no
       "status": "SUCCESS",
       "output": { "body": { "amount": 1000 } }
     },
-    "pulse_002": {
+    "fetchUser_002": {
       "status": "SUCCESS",
       "successOutput": { "statusCode": 200, "body": { "plan": "premium" } }
     }
+  },
+  "nex": {
+    "userId": "abc123",
+    "fetchUser": { "statusCode": 200, "body": { "plan": "premium" } },
+    "start": { "body": { "amount": 1000 } }
   }
 }
 ```
 
 ### Reference Syntax
+
 Any node config value can reference any previously resolved data using `{{...}}`:
 
 ```
 {{variables.userId}}
-{{nodes.pulse_002.successOutput.body.plan}}
+{{nodes.fetchUser_002.successOutput.body.plan}}
 {{nodes.start_001.output.body.amount}}
 {{meta.executionId}}
 ```
+
+### `nex` Unified Context (preferred)
+
+`nex` is a flat shorthand built on top of the NCO. Prefer this in SCRIPT nodes and MAPPER configs:
+
+```
+nex.userId              → trigger field or variable named userId
+nex.fetchUser           → full output of the node labelled "Fetch User"
+nex.fetchUser.body.plan → nested field access
+nex.start               → full trigger payload {body: {...}}
+```
+
+---
+
+## Script Sandboxing
+
+SCRIPT nodes run user-supplied JavaScript (`node`) or Python (`python3`) in a subprocess.
+
+**Two-layer infinite loop protection:**
+
+| Layer | Mechanism | What it catches |
+|-------|-----------|-----------------|
+| **CPU watchdog** | Polls `ProcessHandle.info().totalCpuDuration()` every 2s. Kills if CPU > 90% for 5 consecutive samples (10s) | `while(true) { a++ }` — true infinite loops |
+| **Wall-clock timeout** | Per-node configurable, default 10s, max 300s | I/O stuck forever (e.g. TCP connect to unresponsive host) |
+
+**Blocked patterns** — the following module imports/calls are rejected before execution:
+- JS: `require('child_process')`, `require('fs')`, `require('net')`, `process.env`, `process.exit`, etc.
+- Python: `import subprocess`, `import os`, `import sys`, `exec(`, `eval(`, `open(`, etc.
+
+**Relevant classes:**
+- `engine/ScriptRunner.java` — subprocess execution, CPU watchdog, wrappers
+- `executor/impl/ScriptExecutor.java` — reads node config, calls `ScriptRunner.run()`
+
+---
+
+## Security
+
+| Feature | Implementation |
+|---------|----------------|
+| **Authentication** | JWT in HttpOnly cookie (production) or response body (local dev) |
+| **Authorization** | `JwtAuthFilter` validates token on every request; user ID extracted from claims |
+| **Rate limiting** | `RateLimitFilter` with token bucket (Bucket4j) — 20 req/s per IP |
+| **IDOR protection** | All flow/execution/connector endpoints verify ownership against `userId` from JWT |
+| **SSRF protection** | NEXUS node rejects private IP ranges (10.x, 172.16–31.x, 192.168.x, 127.x, localhost) |
+| **Security headers** | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy via Spring Security |
+| **Script sandbox** | Blocked module imports + CPU watchdog + wall-clock timeout |
 
 ---
 
@@ -99,10 +157,18 @@ Any node config value can reference any previously resolved data using `{{...}}`
 ```
 src/main/java/com/nexflow/
 │
-├── NexflowApplication.java
+├── NexflowBackendApplication.java
 │
 ├── model/
-│   ├── domain/          # JPA entities (Flow, FlowNode, FlowEdge, Execution)
+│   ├── domain/          # JPA entities
+│   │   ├── Flow.java
+│   │   ├── FlowNode.java / FlowEdge.java
+│   │   ├── Execution.java / NodeExecution.java
+│   │   ├── BranchExecution.java
+│   │   ├── NexUser.java / UserGroup.java / GroupMember.java
+│   │   ├── NexusConnector.java
+│   │   ├── LlmProviderConfig.java
+│   │   └── NodeType.java (enum)
 │   └── nco/             # NCO classes (NexflowContextObject, NodeContext, enums)
 │
 ├── executor/
@@ -110,25 +176,49 @@ src/main/java/com/nexflow/
 │   ├── NodeExecutorRegistry.java  # Auto-registers all @Component executors
 │   ├── ReferenceResolver.java     # Resolves {{ref}} expressions from NCO
 │   └── impl/
-│       ├── StartExecutor.java
-│       ├── PulseExecutor.java
-│       ├── VariableExecutor.java
-│       ├── MapperExecutor.java
-│       ├── DecisionExecutor.java
-│       └── TerminalExecutors.java  # SuccessExecutor + FailureExecutor
+│       ├── NexusExecutor.java
+│       ├── ScriptExecutor.java
+│       ├── ForkNodeExecutor.java
+│       ├── JoinNodeExecutor.java
+│       ├── AiNodeExecutor.java
+│       └── SubFlowExecutor.java
+│       └── (StartExecutor, VariableExecutor, MapperExecutor, DecisionExecutor, TerminalExecutors)
 │
 ├── engine/
-│   ├── FlowExecutionEngine.java    # Core DAG walker
-│   └── ExecutionEventPublisher.java # WebSocket broadcaster
+│   ├── FlowExecutionEngine.java      # BFS DAG walker + fork/join orchestration
+│   ├── ScriptRunner.java             # Script subprocess + CPU watchdog
+│   └── ExecutionEventPublisher.java  # WebSocket broadcaster (RabbitMQ STOMP)
+│
+├── security/
+│   ├── JwtTokenProvider.java    # Sign + verify JWT
+│   ├── JwtAuthFilter.java       # Per-request token validation
+│   ├── RateLimitFilter.java     # Token-bucket rate limiter (Bucket4j)
+│   └── OAuth2SuccessHandler.java
+│
+├── controller/
+│   ├── PulseController.java           # POST /api/pulse/{flowSlug}
+│   ├── FlowController.java            # Flow CRUD + canvas save/load
+│   ├── ExecutionController.java       # Execution history + detail
+│   ├── BranchExecutionController.java # Fork/join branch status
+│   ├── NexusController.java           # Nexus connector CRUD
+│   ├── AuthController.java            # Login, signup, OTP, refresh
+│   ├── AssistantController.java       # AI assistant chat
+│   ├── GroupController.java           # User groups + sharing
+│   ├── LlmProviderConfigController.java
+│   ├── AdminController.java
+│   └── GlobalExceptionHandler.java
+│
+├── service/
+│   ├── FlowService.java                      # Execution orchestration + persistence
+│   ├── UserService.java
+│   ├── GroupService.java
+│   ├── AssistantService.java
+│   ├── NodeExecutionPersistenceService.java
+│   └── BranchExecutionPersistenceService.java
 │
 ├── repository/           # Spring Data JPA repositories
-├── service/
-│   └── FlowService.java  # Execution orchestration + persistence
-├── controller/
-│   ├── PulseController.java  # POST /api/pulse/{flowId}
-│   └── FlowController.java   # CRUD + canvas save/load
-└── config/
-    └── AppConfig.java    # RestTemplate, WebSocket, ObjectMapper beans
+│
+└── config/               # AppConfig, WebSocket, Security, RabbitMQ beans
 ```
 
 ---
@@ -137,51 +227,56 @@ src/main/java/com/nexflow/
 
 ### Trigger a Flow
 ```
-POST /api/pulse/{flowId}
+POST /api/pulse/{flowSlug}
 Content-Type: application/json
 
-{
-  "userId": "abc123",
-  "amount": 1000
-}
+{ "userId": "abc123", "amount": 1000 }
 ```
 
-### Create a Flow
+### Flow CRUD
 ```
-POST /api/flows
-{ "name": "My First Flow", "description": "..." }
-```
-
-### Save Canvas (nodes + edges)
-```
-POST /api/flows/{flowId}/canvas
-{
-  "nodes": [ { "nodeType": "START", "positionX": 100, "positionY": 200, ... } ],
-  "edges": [ { "sourceNodeId": "...", "targetNodeId": "...", "conditionType": "SUCCESS" } ]
-}
+GET    /api/flows                    # list flows for current user
+POST   /api/flows                    # create flow
+GET    /api/flows/{flowId}/canvas    # load canvas (nodes + edges)
+POST   /api/flows/{flowId}/canvas    # save canvas
+DELETE /api/flows/{flowId}           # delete flow
 ```
 
-### Load Canvas
+### Execution History
 ```
-GET /api/flows/{flowId}/canvas
+GET /api/executions                  # all executions (transactions page)
+GET /api/flows/{flowId}/executions   # executions for a specific flow
+GET /api/executions/{executionId}    # execution detail + node logs
 ```
 
-### Get Execution History
+### Nexus Connectors
 ```
-GET /api/flows/{flowId}/executions
+GET    /api/nexus/connectors
+POST   /api/nexus/connectors
+PUT    /api/nexus/connectors/{id}
+DELETE /api/nexus/connectors/{id}
+```
+
+### Auth
+```
+POST /api/auth/signup
+POST /api/auth/login
+POST /api/auth/verify-otp
+POST /api/auth/forgot-password
+POST /api/auth/reset-password
+POST /api/auth/refresh
+POST /api/auth/logout
 ```
 
 ---
 
 ## Node Config Shapes
 
-### PULSE node
+### NEXUS node
 ```json
 {
-  "url":     "https://api.example.com/users",
-  "method":  "POST",
-  "headers": { "Authorization": "Bearer {{variables.token}}" },
-  "body":    { "userId": "{{variables.userId}}" }
+  "connectorId": "uuid-of-saved-connector",
+  "body": { "userId": "{{variables.userId}}" }
 }
 ```
 
@@ -189,8 +284,8 @@ GET /api/flows/{flowId}/executions
 ```json
 {
   "variables": {
-    "userId":    "static-value",
-    "userPlan":  "{{nodes.pulse_001.successOutput.body.plan}}"
+    "userId":   "static-value",
+    "userPlan": "{{nodes.fetchUser_001.successOutput.body.plan}}"
   }
 }
 ```
@@ -199,9 +294,9 @@ GET /api/flows/{flowId}/executions
 ```json
 {
   "output": {
-    "email":   "{{variables.email}}",
-    "amount":  "{{nodes.start_001.output.body.amount}}",
-    "source":  "nexflow"
+    "email":  "{{variables.email}}",
+    "amount": "{{nodes.start_001.output.body.amount}}",
+    "source": "nexflow"
   }
 }
 ```
@@ -215,6 +310,34 @@ GET /api/flows/{flowId}/executions
 }
 ```
 Supported operators: `GT`, `LT`, `GTE`, `LTE`, `EQ`, `NEQ`, `CONTAINS`
+
+### SCRIPT node
+```json
+{
+  "language":       "javascript",
+  "code":           "const items = nex.fetchOrders?.body?.items ?? []\nreturn items.filter(i => i.active)",
+  "timeoutSeconds": 30
+}
+```
+Languages: `javascript` (via `node`), `python` (via `python3`). Default timeout 10s, max 300s.
+
+### FORK node
+```json
+{ "branches": ["branch-a", "branch-b"] }
+```
+
+### JOIN node
+```json
+{ "strategy": "WAIT_ALL" }
+```
+
+### AI node
+```json
+{
+  "providerId": "uuid-of-llm-config",
+  "prompt":     "Summarise this order: {{nex.fetchOrder.body}}"
+}
+```
 
 ### SUCCESS / FAILURE node
 ```json
@@ -230,17 +353,22 @@ Supported operators: `GT`, `LT`, `GTE`, `LTE`, `EQ`, `NEQ`, `CONTAINS`
 
 ## WebSocket (Live Execution Updates)
 
-Studio connects to `ws://localhost:8080/ws` and subscribes to:
+The frontend connects to the RabbitMQ STOMP relay and subscribes to:
 ```
 /topic/execution/{executionId}
+/topic/branch/{branchExecutionId}
 ```
 
-Each message:
+Each node status message:
 ```json
 { "nodeId": "node_002", "status": "SUCCESS", "error": "" }
 ```
 
-Studio uses this to highlight nodes on the canvas in real time.
+**Ports:**
+- AMQP (Spring Boot ↔ RabbitMQ): `5672`
+- STOMP relay (frontend WebSocket): `61613`
+
+`ExecutionEventPublisher` publishes events. If the broker is unavailable, events are dropped with a warning log — flow execution continues unaffected.
 
 ---
 
@@ -249,29 +377,46 @@ Studio uses this to highlight nodes on the canvas in real time.
 ### Prerequisites
 - Java 17+
 - PostgreSQL running on port 5432
-- Redis running on port 6379
+- RabbitMQ with STOMP plugin enabled (port 5672 AMQP, 61613 STOMP)
 
 ### Database
 ```sql
 CREATE DATABASE nexflow;
 ```
-JPA will auto-create tables on first run (`ddl-auto: update`).
+JPA will auto-create/update tables on first run (`ddl-auto: update`).
 
-### Run
+### Local Run
 ```bash
 ./mvnw spring-boot:run
 ```
+Or with the prod profile:
+```bash
+java -jar target/nexflow-backend.jar --spring.profiles.active=prod
+```
+
+### Environment Variables (prod)
+| Variable | Description |
+|----------|-------------|
+| `DB_URL` | JDBC URL e.g. `jdbc:postgresql://localhost:5432/nexflow` |
+| `DB_USERNAME` | Postgres user |
+| `DB_PASSWORD` | Postgres password |
+| `RABBITMQ_HOST` | RabbitMQ host |
+| `RABBITMQ_AMQP_PORT` | AMQP port (default 5672) |
+| `RABBITMQ_STOMP_PORT` | STOMP relay port (default 61613) |
+| `RABBITMQ_USERNAME` | RabbitMQ user |
+| `RABBITMQ_PASSWORD` | RabbitMQ password |
+| `JWT_SECRET` | 256-bit secret for JWT signing |
+| `APP_LOCAL_DEV` | `true` → token in response body; `false` → HttpOnly cookie |
 
 ---
 
-## What's Next (Future Sprints)
+## Design Patterns Used
 
-| Feature | Notes |
+| Pattern | Where |
 |---------|-------|
-| `KafkaProducerExecutor` | Produce to a topic — just add `@Component`, zero engine changes |
-| `SqlScriptExecutor` | Run a SQL query, output rows into NCO |
-| `DelayExecutor` | Wait N seconds between nodes |
-| Immutable NCO / Replay | Store NCO snapshot per node for full execution replay |
-| Scheduled Pulse | Cron-based trigger instead of HTTP |
-| Authentication | JWT-based user auth |
-| Multi-tenancy | Scope flows and executions per user/org |
+| **Strategy** | `NodeExecutor` interface — each node type is a strategy |
+| **Registry** | `NodeExecutorRegistry` — Spring auto-discovers all `@Component` executors |
+| **Builder** | NCO construction before flow execution |
+| **Observer** | `ExecutionEventPublisher` broadcasts node status to WebSocket subscribers |
+| **Filter Chain** | `JwtAuthFilter` → `RateLimitFilter` in Spring Security filter chain |
+| **BFS** | `FlowExecutionEngine` walks the DAG breadth-first |
