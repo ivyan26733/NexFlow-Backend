@@ -553,12 +553,25 @@ public class FlowExecutionEngine {
     }
 
     /**
-     * Converts a node label to a camelCase key for {{}} refs (e.g. "Calculate Discount" → "calculateDiscount").
+     * Converts a node label to a camelCase key for {{}} refs.
+     *
+     * Multi-word labels: standard camelCase — "Calculate Discount" → "calculateDiscount".
+     * Single-word labels: lowercase only the first character so user-written camelCase
+     *   labels like "generateData" stay as "generateData" instead of becoming "generatedata".
+     *   Examples: "generateData" → "generateData", "Orders" → "orders", "TOTAL" → "tOTAL".
      */
     public static String toLabelKey(String label) {
         if (label == null || label.isBlank()) return "node";
         String[] words = label.trim().replaceAll("[^a-zA-Z0-9 ]", "").split("\\s+");
         if (words.length == 0 || words[0].isBlank()) return "node";
+
+        if (words.length == 1) {
+            // Single word — lowercase only the first character to preserve camelCase intent
+            String w = words[0];
+            return Character.toLowerCase(w.charAt(0)) + w.substring(1);
+        }
+
+        // Multi-word — standard camelCase: first word all-lowercase, rest Title-case
         StringBuilder key = new StringBuilder(words[0].toLowerCase());
         for (int i = 1; i < words.length; i++) {
             if (!words[i].isBlank()) {

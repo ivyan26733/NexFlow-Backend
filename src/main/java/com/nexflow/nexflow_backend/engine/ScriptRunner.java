@@ -5,7 +5,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -13,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Runs user-supplied scripts in a sandboxed subprocess.
@@ -179,6 +182,17 @@ public class ScriptRunner {
                     .redirectErrorStream(false)
                     .start();
 
+            // ── Drain stdout + stderr concurrently ────────────────────────────
+            // IMPORTANT: must drain both streams in background threads BEFORE calling
+            // waitFor(). If the script writes more than the OS pipe buffer (~64 KB on
+            // Linux) before the JVM reads, the script blocks on write() and the JVM
+            // blocks in waitFor() — deadlock, always hitting the wall-clock timeout.
+            AtomicReference<byte[]> stdoutBytes = new AtomicReference<>(new byte[0]);
+            AtomicReference<byte[]> stderrBytes = new AtomicReference<>(new byte[0]);
+
+            Thread stdoutDrainer = drainStream(process.getInputStream(), stdoutBytes);
+            Thread stderrDrainer = drainStream(process.getErrorStream(), stderrBytes);
+
             // ── Layer 1: CPU watchdog ─────────────────────────────────────────
             AtomicBoolean infiniteLoopKilled = new AtomicBoolean(false);
             Thread watchdog = startCpuWatchdog(process, infiniteLoopKilled);
@@ -186,6 +200,10 @@ public class ScriptRunner {
             // ── Layer 2: wall-clock timeout ───────────────────────────────────
             boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
             watchdog.interrupt(); // stop watchdog — process is done or timed out
+
+            // Wait for drainer threads so stdout/stderr are fully read before we use them
+            stdoutDrainer.join(5_000);
+            stderrDrainer.join(5_000);
 
             // Check watchdog result first — it killed the process before timeout fired
             if (infiniteLoopKilled.get()) {
@@ -204,8 +222,8 @@ public class ScriptRunner {
                 );
             }
 
-            String stdout = new String(process.getInputStream().readAllBytes()).trim();
-            String stderr = new String(process.getErrorStream().readAllBytes()).trim();
+            String stdout = new String(stdoutBytes.get()).trim();
+            String stderr = new String(stderrBytes.get()).trim();
 
             if (stdout.isEmpty()) {
                 String errorMsg = stderr.isEmpty() ? "Script produced no output." : stderr;
@@ -333,6 +351,34 @@ public class ScriptRunner {
                      .totalCpuDuration()
                      .map(Duration::toNanos)
                      .orElse(-1L);
+    }
+
+    /**
+     * Spawns a daemon thread that reads the given InputStream fully into a byte array.
+     * The result is stored in the provided AtomicReference.
+     *
+     * Why: OS pipe buffers are typically 64 KB on Linux. If a script writes more than
+     * that to stdout before the JVM reads it, the script blocks on write() while the
+     * JVM is blocked in waitFor() — classic deadlock. Draining in a background thread
+     * prevents this regardless of output size.
+     */
+    private Thread drainStream(InputStream stream, AtomicReference<byte[]> target) {
+        Thread t = new Thread(() -> {
+            try {
+                ByteArrayOutputStream buf = new ByteArrayOutputStream();
+                byte[] chunk = new byte[8192];
+                int n;
+                while ((n = stream.read(chunk)) != -1) {
+                    buf.write(chunk, 0, n);
+                }
+                target.set(buf.toByteArray());
+            } catch (IOException ignored) {
+                // stream closed early (process killed) — use whatever was collected
+            }
+        });
+        t.setDaemon(true);
+        t.start();
+        return t;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
