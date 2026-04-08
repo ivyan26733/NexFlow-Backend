@@ -248,8 +248,26 @@ public class ForkNodeExecutor implements NodeExecutor {
             log.info("[ForkNode] WAIT_N={} quorum met — using {} branch(es)", waitForN, toMerge.size());
         }
 
-        // Merge successful branch outputs into parent nex
-        toMerge.forEach(r -> nco.getNex().put(r.getBranchName(), r.getNex()));
+        // Merge successful branch outputs into parent nex.
+        // Two levels of merge so downstream scripts can access branch data either way:
+        //   nex.BranchName.someKey   — namespaced (no conflicts between branches)
+        //   nex.someKey              — flat (branch key written directly to parent nex)
+        //
+        // Flat spread uses putIfAbsent so:
+        //   1. Pre-fork keys already in parent nex are never overwritten.
+        //   2. When two branches both produce the same key, the branch that appears first in
+        //      the toMerge list wins (deterministic: WAIT_ALL preserves declaration order).
+        toMerge.forEach(r -> {
+            // Namespaced: nex.Flow1 = { sortAndRank: {...}, ... }
+            nco.getNex().put(r.getBranchName(), r.getNex());
+
+            // Flat spread: nex.sortAndRank = {...}  (only keys the branch itself added,
+            // but since branch nex is a shallow copy of parent we spread everything;
+            // putIfAbsent means pre-fork and earlier-branch keys are never clobbered)
+            if (r.getNex() != null) {
+                r.getNex().forEach((k, v) -> nco.getNex().putIfAbsent(k, v));
+            }
+        });
 
         // Write timing and status metadata under nex.join
         Map<String, Object> joinMeta = new LinkedHashMap<>();

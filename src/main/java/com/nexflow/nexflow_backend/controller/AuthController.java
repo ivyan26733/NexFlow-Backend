@@ -6,6 +6,7 @@ import com.nexflow.nexflow_backend.security.JwtTokenProvider;
 import com.nexflow.nexflow_backend.service.UserService;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseCookie;
@@ -16,6 +17,7 @@ import org.springframework.web.bind.annotation.*;
 import java.time.Duration;
 import java.util.Map;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/auth")
 @RequiredArgsConstructor
@@ -33,10 +35,12 @@ public class AuthController {
     public ResponseEntity<?> signup(@RequestBody SignupRequest req) {
         try {
             userService.register(req.email(), req.password(), req.name());
+            log.info("[Auth] signup ok email={}", req.email());
             return ResponseEntity.ok(Map.of(
                     "message", "Verification code sent to " + req.email()
             ));
         } catch (IllegalArgumentException e) {
+            log.warn("[Auth] signup failed email={}: {}", req.email(), e.getMessage());
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
@@ -48,8 +52,10 @@ public class AuthController {
             NexUser user  = userService.verifyOtp(req.email(), req.otp());
             String  token = jwtProvider.generateToken(user);
             issueTokenCookie(response, token);
+            log.info("[Auth] verify-otp ok userId={} email={}", user.getId(), user.getEmail());
             return ResponseEntity.ok(toAuthResponse(token, user));
         } catch (IllegalArgumentException e) {
+            log.warn("[Auth] verify-otp failed email={}: {}", req.email(), e.getMessage());
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
@@ -74,7 +80,18 @@ public class AuthController {
             issueTokenCookie(response, token);
             return ResponseEntity.ok(toAuthResponse(token, user));
         } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+            String msg = e.getMessage();
+            if (msg != null && msg.startsWith("EMAIL_NOT_VERIFIED:")) {
+                String email = msg.substring("EMAIL_NOT_VERIFIED:".length());
+                log.warn("[Auth] login blocked email not verified email={}", email);
+                return ResponseEntity.status(403).body(Map.of(
+                        "error", "EMAIL_NOT_VERIFIED",
+                        "email", email,
+                        "message", "Please verify your email. A new code has been sent."
+                ));
+            }
+            log.warn("[Auth] login failed email={}: {}", req.email(), msg);
+            return ResponseEntity.badRequest().body(Map.of("error", msg));
         }
     }
 
@@ -105,6 +122,7 @@ public class AuthController {
     /** Logout — clears the HttpOnly cookie server-side. */
     @PostMapping("/logout")
     public ResponseEntity<?> logout(HttpServletResponse response) {
+        log.info("[Auth] logout (cookie cleared)");
         ResponseCookie expired = ResponseCookie.from("nexflow_token", "")
                 .httpOnly(true)
                 .secure(!localDev)

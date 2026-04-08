@@ -124,8 +124,14 @@ public class ReferenceResolver {
             if (value instanceof String s) {
                 String trimmed = s.trim();
                 if (trimmed.length() >= 5 && trimmed.startsWith("{{") && trimmed.endsWith("}}")) {
+                    // Explicit {{reference}} syntax
                     String inner = trimmed.substring(2, trimmed.length() - 2).trim();
                     Object obj = resolvePathOrExpression(inner, nco, loopContext);
+                    resolved.put(key, obj != null ? obj : "");
+                } else if (isBareReference(trimmed)) {
+                    // Bare reference path written without {{ }} — e.g. nex.mat.result.passRate
+                    // Treat exactly the same as {{nex.mat.result.passRate}} so users don't need the braces
+                    Object obj = resolvePathOrExpression(trimmed, nco, loopContext);
                     resolved.put(key, obj != null ? obj : "");
                 } else {
                     resolved.put(key, resolve(s, nco, loopContext));
@@ -135,6 +141,19 @@ public class ReferenceResolver {
             }
         });
         return resolved;
+    }
+
+    /**
+     * Returns true if the string is a bare reference path that should be resolved
+     * without requiring {{ }} syntax. Matches paths starting with known NCO namespaces.
+     * Examples: "nex.mat.result.passRate", "variables.userId", "nodes.start.output.body"
+     */
+    private static boolean isBareReference(String s) {
+        return s.startsWith("nex.")
+            || s.startsWith("variables.")
+            || s.startsWith("nodes.")
+            || s.startsWith("loop.")
+            || s.startsWith("meta.");
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.nexflow.nexflow_backend.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.nexflow.nexflow_backend.engine.FlowExecutionEngine;
 import com.nexflow.nexflow_backend.model.domain.Execution;
 import com.nexflow.nexflow_backend.model.nco.ExecutionStatus;
@@ -31,6 +32,7 @@ public class FlowService {
     private final FlowExecutionEngine engine;
     private final FlowRepository flowRepository;
     private final ExecutionRepository executionRepository;
+    private final ExecutionListCacheService executionListCacheService;
     private final ObjectMapper objectMapper;
     @Qualifier("flowExecutionExecutor")
     private final Executor flowExecutionExecutor;
@@ -41,6 +43,8 @@ public class FlowService {
      * multiple callers race to invoke startExecution().
      */
     private final Set<UUID> activeExecutions = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, CompletableFuture<Void>> executionTasks = new ConcurrentHashMap<>();
+    private static final String DISCARDED_ERROR_MESSAGE = "Execution discarded by user.";
 
     /**
      * Phase 1: Create the execution record and persist the trigger payload.
@@ -62,6 +66,7 @@ public class FlowService {
         execution.setPayload(payload);
         execution.setCompletedAt(null);
         execution = executionRepository.save(execution);
+        executionListCacheService.bumpGeneration();
 
         log.info(
                 "[FlowService] prepareExecution flowId={} executionId={} triggeredBy={} payloadKeys={}",
@@ -114,15 +119,15 @@ public class FlowService {
                 ? execution.getPayload()
                 : (payload != null ? payload : Map.of());
 
-        CompletableFuture.runAsync(() -> {
-                    try {
-                        runExecutionInBackground(executionId, execution.getFlowId(), effectivePayload);
-                    } finally {
-                        activeExecutions.remove(executionId);
-                    }
-                },
+        CompletableFuture<Void> task = CompletableFuture.runAsync(
+                () -> runExecutionInBackground(executionId, execution.getFlowId(), effectivePayload),
                 flowExecutionExecutor
         );
+        executionTasks.put(executionId, task);
+        task.whenComplete((ok, err) -> {
+            activeExecutions.remove(executionId);
+            executionTasks.remove(executionId);
+        });
     }
 
     /**
@@ -153,6 +158,7 @@ public class FlowService {
         execution.setTriggeredBy(triggeredBy);
         execution.setPayload(payload);
         execution = executionRepository.save(execution);
+        executionListCacheService.bumpGeneration();
 
         final UUID executionId = execution.getId();
 
@@ -182,8 +188,16 @@ public class FlowService {
             );
 
             NexflowContextObject nco = engine.execute(flowId, executionId.toString(), payload);
-            execution.setStatus(nco.getMeta().getStatus());
-            execution.setNcoSnapshot(objectMapper.convertValue(nco, Map.class));
+            Execution latest = executionRepository.findById(executionId).orElse(execution);
+            if (isExternallyFinalized(latest)) {
+                log.info("[FlowService] runExecutionInBackground skip finalize: executionId={} already finalized", executionId);
+                return;
+            }
+            latest.setStatus(nco.getMeta().getStatus());
+            latest.setNcoSnapshot(objectMapper.convertValue(nco, new TypeReference<Map<String, Object>>() {}));
+            latest.setCompletedAt(Instant.now());
+            executionRepository.save(latest);
+            executionListCacheService.bumpGeneration();
 
             log.info(
                     "[FlowService] runExecutionInBackground END flowId={} executionId={} status={}",
@@ -194,23 +208,57 @@ public class FlowService {
         } catch (Exception ex) {
             String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
             log.error("Flow {} execution failed: {}", flowId, msg, ex);
-            execution.setStatus(ExecutionStatus.FAILURE);
-            execution.setErrorMessage(msg);
+            Execution latest = executionRepository.findById(executionId).orElse(execution);
+            if (isExternallyFinalized(latest)) {
+                log.info("[FlowService] runExecutionInBackground skip failure finalize: executionId={} already finalized", executionId);
+                return;
+            }
+            latest.setStatus(ExecutionStatus.FAILURE);
+            latest.setErrorMessage(msg);
             // Persist snapshot so transaction is always created and detail page can show error for debugging
             Map<String, Object> meta = new java.util.LinkedHashMap<>();
             meta.put("flowId", flowId.toString());
             meta.put("executionId", executionId.toString());
             meta.put("status", ExecutionStatus.FAILURE.name());
             meta.put("completedAt", Instant.now().toString());
-            execution.setNcoSnapshot(Map.of(
+            latest.setNcoSnapshot(Map.of(
                     "nodes", Map.of(),
                     "nodeExecutionOrder", List.of(),
                     "meta", meta,
                     "error", msg
             ));
+            latest.setCompletedAt(Instant.now());
+            executionRepository.save(latest);
+            executionListCacheService.bumpGeneration();
         }
-        execution.setCompletedAt(Instant.now());
-        executionRepository.save(execution);
+    }
+
+    public int discardRunningExecutions(Set<UUID> allowedFlowIds) {
+        List<Execution> running = executionRepository.findByStatusOrderByStartedAtDesc(ExecutionStatus.RUNNING);
+        int discarded = 0;
+        for (Execution execution : running) {
+            if (allowedFlowIds != null && !allowedFlowIds.contains(execution.getFlowId())) {
+                continue;
+            }
+            execution.setStatus(ExecutionStatus.FAILURE);
+            execution.setErrorMessage(DISCARDED_ERROR_MESSAGE);
+            execution.setCompletedAt(Instant.now());
+            executionRepository.save(execution);
+            CompletableFuture<Void> task = executionTasks.remove(execution.getId());
+            if (task != null) {
+                task.cancel(true);
+            }
+            activeExecutions.remove(execution.getId());
+            discarded++;
+        }
+        if (discarded > 0) {
+            executionListCacheService.bumpGeneration();
+        }
+        return discarded;
+    }
+
+    private static boolean isExternallyFinalized(Execution execution) {
+        return execution.getCompletedAt() != null && execution.getStatus() != ExecutionStatus.RUNNING;
     }
 
     

@@ -34,6 +34,8 @@ public class BranchExecutionController {
             @PathVariable UUID forkNodeId) {
         List<BranchExecution> branches =
                 branchRepo.findByExecutionIdAndForkNodeId(executionId, forkNodeId);
+        log.info("[BranchExecutionController] GET branches executionId={} forkNodeId={} count={}",
+                executionId, forkNodeId, branches.size());
         return ResponseEntity.ok(branches);
     }
 }

@@ -1,16 +1,19 @@
 package com.nexflow.nexflow_backend.controller;
 
+import com.nexflow.nexflow_backend.FlowStatus;
 import com.nexflow.nexflow_backend.model.domain.Execution;
 import com.nexflow.nexflow_backend.model.domain.Flow;
 import com.nexflow.nexflow_backend.repository.FlowRepository;
 import com.nexflow.nexflow_backend.service.FlowService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
 import java.util.UUID;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/pulse")
 @RequiredArgsConstructor
@@ -41,14 +44,30 @@ public class PulseController {
         UUID flowId = resolveFlowId(slugOrId);
         Map<String, Object> safePayload = payload != null ? payload : Map.of();
         boolean isStudioTrigger = "1".equals(studioTrigger);
+        Flow flow = flowRepository.findById(flowId).orElseThrow(() -> new IllegalArgumentException("Flow not found: " + slugOrId));
+
+        log.info(
+                "[Pulse] trigger slugOrId={} flowId={} studio={} flowStatus={} payloadKeys={}",
+                slugOrId,
+                flowId,
+                isStudioTrigger,
+                flow.getStatus(),
+                safePayload.keySet()
+        );
 
         if (isStudioTrigger) {
             // MODE A: two-phase — Studio will call /api/executions/{id}/start later
-            Execution execution = flowService.prepareExecution(flowId, safePayload, "PULSE");
+            Execution execution = flowService.prepareExecution(flowId, safePayload, "STUDIO");
+            log.info("[Pulse] studio prepare executionId={} flowId={}", execution.getId(), flowId);
             return ResponseEntity.ok(execution);
         } else {
             // MODE B: single-phase — external callers, start immediately
+            if (flow.getStatus() != FlowStatus.ACTIVE) {
+                log.warn("[Pulse] rejected external trigger flowId={} status={} (requires ACTIVE)", flowId, flow.getStatus());
+                return ResponseEntity.status(403).build();
+            }
             Execution execution = flowService.prepareAndStartExecution(flowId, safePayload, "PULSE");
+            log.info("[Pulse] external started executionId={} flowId={}", execution.getId(), flowId);
             return ResponseEntity.ok(execution);
         }
     }

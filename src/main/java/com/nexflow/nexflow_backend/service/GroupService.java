@@ -3,12 +3,14 @@ package com.nexflow.nexflow_backend.service;
 import com.nexflow.nexflow_backend.model.domain.*;
 import com.nexflow.nexflow_backend.repository.*;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.UUID;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class GroupService {
@@ -25,7 +27,9 @@ public class GroupService {
         g.setName(name.trim());
         g.setOwnerId(owner.getId());
         g.setAllFlowsAccess(allFlowsAccess);
-        return groupRepository.save(g);
+        UserGroup saved = groupRepository.save(g);
+        log.info("[GroupService] createGroup groupId={} ownerId={} allFlowsAccess={}", saved.getId(), owner.getId(), allFlowsAccess);
+        return saved;
     }
 
     public List<UserGroup> listGroups(NexUser requester) {
@@ -48,7 +52,9 @@ public class GroupService {
         requireGroupAccess(g, requester);
         if (name != null && !name.isBlank()) g.setName(name.trim());
         g.setAllFlowsAccess(allFlowsAccess);
-        return groupRepository.save(g);
+        UserGroup saved = groupRepository.save(g);
+        log.info("[GroupService] updateGroup groupId={}", groupId);
+        return saved;
     }
 
     @Transactional
@@ -59,6 +65,7 @@ public class GroupService {
         memberRepository.deleteAll(memberRepository.findByGroupId(groupId));
         accessRepository.deleteAll(accessRepository.findByTargetTypeAndTargetId("GROUP", groupId));
         groupRepository.delete(g);
+        log.info("[GroupService] deleteGroup groupId={}", groupId);
     }
 
     // ── Members ───────────────────────────────────────────────────────────────
@@ -77,7 +84,9 @@ public class GroupService {
         GroupMember m = new GroupMember();
         m.setGroupId(groupId);
         m.setUserId(userId);
-        return memberRepository.save(m);
+        GroupMember saved = memberRepository.save(m);
+        log.info("[GroupService] addMember groupId={} userId={}", groupId, userId);
+        return saved;
     }
 
     @Transactional
@@ -86,6 +95,7 @@ public class GroupService {
                 .orElseThrow(() -> new IllegalArgumentException("Group not found"));
         requireGroupAccess(g, requester);
         memberRepository.deleteByGroupIdAndUserId(groupId, userId);
+        log.info("[GroupService] removeMember groupId={} userId={}", groupId, userId);
     }
 
     public List<NexUser> listMembers(UUID groupId, NexUser requester) {
@@ -112,12 +122,15 @@ public class GroupService {
         fa.setTargetType(targetType);
         fa.setTargetId(targetId);
         fa.setGrantedBy(requester.getId());
-        return accessRepository.save(fa);
+        FlowAccess saved = accessRepository.save(fa);
+        log.info("[GroupService] grantFlowAccess flowId={} targetType={} targetId={}", flowId, targetType, targetId);
+        return saved;
     }
 
     @Transactional
     public void revokeFlowAccess(UUID flowId, String targetType, UUID targetId) {
         accessRepository.deleteByFlowIdAndTargetTypeAndTargetId(flowId, targetType, targetId);
+        log.info("[GroupService] revokeFlowAccess flowId={} targetType={} targetId={}", flowId, targetType, targetId);
     }
 
     public List<FlowAccess> listFlowAccess(UUID flowId) {
@@ -132,9 +145,7 @@ public class GroupService {
      */
     public boolean hasFlowAccess(UUID flowId, UUID ownerId, NexUser user) {
         if (user.getRole() == UserRole.ADMIN) return true;
-        // Flows with no owner (created before auth) are accessible to all logged-in users
-        if (ownerId == null) return true;
-        if (user.getId().equals(ownerId)) return true;
+        if (ownerId != null && user.getId().equals(ownerId)) return true;
 
         // Direct user access
         if (accessRepository.findByFlowIdAndTargetTypeAndTargetId(flowId, "USER", user.getId()).isPresent()) {
@@ -153,6 +164,9 @@ public class GroupService {
                 return true;
             }
         }
+
+        // Legacy flows may have null ownerId; without explicit/direct/group grant, keep denied.
+        if (ownerId == null) return false;
 
         return false;
     }

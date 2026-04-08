@@ -3,6 +3,7 @@ package com.nexflow.nexflow_backend.controller;
 import com.nexflow.nexflow_backend.model.domain.*;
 import com.nexflow.nexflow_backend.service.GroupService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
@@ -11,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/groups")
 @RequiredArgsConstructor
@@ -32,8 +34,10 @@ public class GroupController {
             String  name          = (String) body.getOrDefault("name", "");
             boolean allFlowAccess = Boolean.TRUE.equals(body.get("allFlowsAccess"));
             UserGroup g = groupService.createGroup(name, allFlowAccess, user);
+            log.info("[Group] created groupId={} ownerId={}", g.getId(), user.getId());
             return ResponseEntity.ok(g);
         } catch (IllegalArgumentException e) {
+            log.warn("[Group] create failed: {}", e.getMessage());
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
@@ -66,8 +70,10 @@ public class GroupController {
                                           @AuthenticationPrincipal NexUser user) {
         try {
             groupService.deleteGroup(groupId, user);
+            log.info("[Group] deleted groupId={} by userId={}", groupId, user.getId());
             return ResponseEntity.noContent().build();
         } catch (IllegalArgumentException e) {
+            log.warn("[Group] delete groupId={} failed: {}", groupId, e.getMessage());
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
@@ -123,8 +129,10 @@ public class GroupController {
                                               @AuthenticationPrincipal NexUser user) {
         try {
             FlowAccess fa = groupService.grantFlowAccess(flowId, "GROUP", groupId, user);
+            log.info("[Group] grant flow access groupId={} flowId={}", groupId, flowId);
             return ResponseEntity.ok(fa);
         } catch (IllegalArgumentException e) {
+            log.warn("[Group] grant flow access failed: {}", e.getMessage());
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
@@ -134,6 +142,7 @@ public class GroupController {
                                                @PathVariable UUID flowId,
                                                @AuthenticationPrincipal NexUser user) {
         groupService.revokeFlowAccess(flowId, "GROUP", groupId);
+        log.info("[Group] revoke flow access groupId={} flowId={}", groupId, flowId);
         return ResponseEntity.noContent().build();
     }
 }

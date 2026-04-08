@@ -19,13 +19,15 @@ public class GlobalExceptionHandler {
 
     /** 400 — expected validation failures */
     @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<Map<String, String>> handleBadRequest(IllegalArgumentException ex) {
+    public ResponseEntity<Map<String, String>> handleBadRequest(IllegalArgumentException ex, HttpServletRequest req) {
+        log.debug("Bad request {} — {}", req.getRequestURI(), ex.getMessage());
         return ResponseEntity.badRequest().body(Map.of("error", ex.getMessage()));
     }
 
     /** 403 — @PreAuthorize failures */
     @ExceptionHandler(AccessDeniedException.class)
-    public ResponseEntity<Map<String, String>> handleForbidden(AccessDeniedException ex) {
+    public ResponseEntity<Map<String, String>> handleForbidden(AccessDeniedException ex, HttpServletRequest req) {
+        log.warn("Forbidden {} — {}", req.getRequestURI(), ex.getMessage());
         return ResponseEntity.status(403).body(Map.of("error", "Access denied"));
     }
 

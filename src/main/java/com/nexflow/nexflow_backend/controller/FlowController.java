@@ -1,5 +1,6 @@
 package com.nexflow.nexflow_backend.controller;
 
+import com.nexflow.nexflow_backend.FlowStatus;
 import com.nexflow.nexflow_backend.EdgeCondition;
 import com.nexflow.nexflow_backend.model.domain.*;
 import com.nexflow.nexflow_backend.model.dto.CanvasSaveDto;
@@ -8,10 +9,13 @@ import com.nexflow.nexflow_backend.model.dto.FlowNodeDto;
 import com.nexflow.nexflow_backend.repository.*;
 import com.nexflow.nexflow_backend.service.GroupService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
+
+import java.time.Instant;
 
 import java.util.HashSet;
 import java.util.List;
@@ -19,6 +23,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/flows")
 @RequiredArgsConstructor
@@ -28,19 +33,28 @@ public class FlowController {
     private final FlowNodeRepository nodeRepository;
     private final FlowEdgeRepository edgeRepository;
     private final ExecutionRepository executionRepository;
+    private final NexUserRepository nexUserRepository;
+    private final FlowSaveLogRepository flowSaveLogRepository;
     private final GroupService groupService;
 
     @GetMapping
-    public List<Flow> getAllFlows(@AuthenticationPrincipal NexUser user) {
+    public List<FlowResponse> getAllFlows(@AuthenticationPrincipal NexUser user) {
+        if (user == null) return List.of();
         List<Flow> all = flowRepository.findAll();
-        if (user == null || user.getRole() == UserRole.ADMIN) return all;
-        return all.stream()
+        if (user.getRole() == UserRole.ADMIN) {
+            log.debug("[Flow] listAll userId={} (admin) total={}", user.getId(), all.size());
+            return all.stream().map(this::toFlowResponse).toList();
+        }
+        List<FlowResponse> filtered = all.stream()
                 .filter(f -> groupService.hasFlowAccess(f.getId(), f.getUserId(), user))
+                .map(this::toFlowResponse)
                 .toList();
+        log.debug("[Flow] listAll userId={} accessible={}", user.getId(), filtered.size());
+        return filtered;
     }
 
     @PostMapping
-    public ResponseEntity<Flow> createFlow(@RequestBody Flow flow, @AuthenticationPrincipal NexUser user) {
+    public ResponseEntity<FlowResponse> createFlow(@RequestBody Flow flow, @AuthenticationPrincipal NexUser user) {
         if (user == null) return ResponseEntity.status(401).build();
         flow.setUserId(user.getId());
         if (flow.getSlug() == null || flow.getSlug().isBlank()) {
@@ -51,7 +65,10 @@ public class FlowController {
         while (flowRepository.existsBySlug(flow.getSlug())) {
             flow.setSlug(base + "-" + counter++);
         }
-        return ResponseEntity.ok(flowRepository.save(flow));
+        Flow saved = flowRepository.save(flow);
+        log.info("[Flow] created flowId={} userId={} slug={}", saved.getId(), user.getId(), saved.getSlug());
+        recordActivity(saved.getId(), user.getId(), "FLOW_CREATED");
+        return ResponseEntity.ok(toFlowResponse(saved));
     }
 
     /** "Auth Service" → "auth-service" */
@@ -66,31 +83,82 @@ public class FlowController {
     }
 
     @GetMapping("/{flowId}")
-    public ResponseEntity<Flow> getFlow(@PathVariable UUID flowId,
-                                         @AuthenticationPrincipal NexUser user) {
+    public ResponseEntity<FlowResponse> getFlow(@PathVariable UUID flowId,
+                                                @AuthenticationPrincipal NexUser user) {
         return flowRepository.findById(flowId)
                 .filter(f -> user == null || groupService.hasFlowAccess(f.getId(), f.getUserId(), user))
                 .map(this::ensureSlug)
+                .map(this::toFlowResponse)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
     }
 
     @PutMapping("/{flowId}")
-    public ResponseEntity<Flow> updateFlow(@PathVariable UUID flowId,
-                                            @RequestBody Map<String, String> body,
-                                            @AuthenticationPrincipal NexUser user) {
+    public ResponseEntity<FlowResponse> updateFlow(@PathVariable UUID flowId,
+                                                   @RequestBody Map<String, String> body,
+                                                   @AuthenticationPrincipal NexUser user) {
         if (user == null) return ResponseEntity.status(401).build();
-        if (body == null || !body.containsKey("name")) return ResponseEntity.badRequest().build();
+        if (body == null) return ResponseEntity.badRequest().build();
         String name = body.get("name");
-        if (name == null || name.isBlank()) return ResponseEntity.badRequest().build();
+        String statusRaw = body.get("status");
+        FlowStatus parsedStatus = null;
+        if (statusRaw != null && !statusRaw.isBlank()) {
+            try {
+                parsedStatus = FlowStatus.valueOf(statusRaw.trim().toUpperCase());
+            } catch (IllegalArgumentException ex) {
+                return ResponseEntity.badRequest().build();
+            }
+        }
+        final FlowStatus nextStatus = parsedStatus;
+        if ((name == null || name.isBlank()) && nextStatus == null) return ResponseEntity.badRequest().build();
         return flowRepository.findById(flowId)
                 .filter(f -> isOwnerOrAdmin(f, user))
                 .map(flow -> {
-                    flow.setName(name.trim());
-                    return flowRepository.save(flow);
+                    if (name != null && !name.isBlank()) {
+                        flow.setName(name.trim());
+                    }
+                    if (nextStatus != null) {
+                        flow.setStatus(nextStatus);
+                    }
+                    Flow saved = flowRepository.save(flow);
+                    log.info("[Flow] updated flowId={} userId={} nameChanged={} status={}",
+                            flowId, user.getId(), name != null && !name.isBlank(), saved.getStatus());
+                    return saved;
                 })
+                .map(this::toFlowResponse)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.status(403).build());
+    }
+
+    private void recordActivity(UUID flowId, UUID userId, String activityType) {
+        try {
+            FlowSaveLog log = new FlowSaveLog();
+            log.setFlowId(flowId);
+            log.setUserId(userId);
+            log.setActivityType(activityType);
+            log.setSavedAt(Instant.now());
+            flowSaveLogRepository.save(log);
+        } catch (Exception ex) {
+            FlowController.log.warn("[Flow] failed to record activity flowId={} type={}: {}", flowId, activityType, ex.getMessage());
+        }
+    }
+
+    private FlowResponse toFlowResponse(Flow flow) {
+        String createdByName = null;
+        if (flow.getUserId() != null) {
+            createdByName = nexUserRepository.findById(flow.getUserId()).map(NexUser::getName).orElse(null);
+        }
+        return new FlowResponse(
+                flow.getId(),
+                flow.getName(),
+                flow.getSlug(),
+                flow.getDescription(),
+                flow.getUserId(),
+                flow.getStatus(),
+                flow.getCreatedAt(),
+                flow.getUpdatedAt(),
+                createdByName
+        );
     }
 
     /** Backfill slug if missing so trigger-by-slug works for flows created before slug was required. */
@@ -138,6 +206,9 @@ public class FlowController {
             }
         }
 
+        log.info("[Flow] canvas saved flowId={} userId={} nodes={} edges={}",
+                flowId, user.getId(), dto.nodes() != null ? dto.nodes().size() : 0, dto.edges() != null ? dto.edges().size() : 0);
+        recordActivity(flowId, user.getId(), "CANVAS_SAVED");
         return ResponseEntity.ok().build();
     }
 
@@ -247,6 +318,7 @@ public class FlowController {
         nodeRepository.deleteAll(nodeRepository.findByFlowId(flowId));
         edgeRepository.deleteAll(edgeRepository.findByFlowId(flowId));
         flowRepository.deleteById(flowId);
+        log.info("[Flow] deleted flowId={} userId={}", flowId, user.getId());
         return ResponseEntity.noContent().build();
     }
 
@@ -260,4 +332,17 @@ public class FlowController {
 
     /** Response type for GET canvas; also used internally for the saved entities. */
     public record CanvasSaveRequest(List<FlowNode> nodes, List<FlowEdge> edges) {}
+
+    /** Public flow payload with derived creator name for UI cards. */
+    public record FlowResponse(
+            UUID id,
+            String name,
+            String slug,
+            String description,
+            UUID userId,
+            com.nexflow.nexflow_backend.FlowStatus status,
+            java.time.Instant createdAt,
+            java.time.Instant updatedAt,
+            String createdByName
+    ) {}
 }

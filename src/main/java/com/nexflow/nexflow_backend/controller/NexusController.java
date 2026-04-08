@@ -4,6 +4,7 @@ import com.nexflow.nexflow_backend.model.domain.NexUser;
 import com.nexflow.nexflow_backend.model.domain.NexusConnector;
 import com.nexflow.nexflow_backend.repository.NexusConnectorRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.*;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
@@ -19,6 +20,7 @@ import java.sql.DriverManager;
 import java.time.Instant;
 import java.util.*;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/nexus/connectors")
 @RequiredArgsConstructor
@@ -60,6 +62,7 @@ public class NexusController {
         connector.setCreatedAt(Instant.now());
         connector.setUpdatedAt(Instant.now());
         NexusConnector saved = connectorRepository.save(connector);
+        log.info("[Nexus] connector created id={} userId={} type={}", saved.getId(), user.getId(), saved.getConnectorType());
         return ResponseEntity.ok(ConnectorSummary.from(saved));
     }
 
@@ -96,7 +99,9 @@ public class NexusController {
                     if (updated.getDbPassword() != null && !updated.getDbPassword().isBlank()) {
                         existing.setDbPassword(updated.getDbPassword());
                     }
-                    return ResponseEntity.ok(ConnectorSummary.from(connectorRepository.save(existing)));
+                    NexusConnector saved = connectorRepository.save(existing);
+                    log.info("[Nexus] connector updated id={} userId={}", id, user.getId());
+                    return ResponseEntity.ok(ConnectorSummary.from(saved));
                 })
                 .orElse(ResponseEntity.notFound().build());
     }
@@ -108,6 +113,7 @@ public class NexusController {
         if (opt.isEmpty()) return ResponseEntity.notFound().build();
         if (!canAccess(opt.get(), user)) return ResponseEntity.status(403).build();
         connectorRepository.deleteById(id);
+        log.info("[Nexus] connector deleted id={} userId={}", id, user.getId());
         return ResponseEntity.noContent().build();
     }
 
@@ -121,6 +127,7 @@ public class NexusController {
         NexusConnector connector = opt.get();
         if (!canAccess(connector, user)) return ResponseEntity.status(403).build();
 
+        log.info("[Nexus] test connection start id={} userId={} type={}", id, user.getId(), connector.getConnectorType());
         long start = System.currentTimeMillis();
         Map<String, Object> result = new LinkedHashMap<>();
         try {
@@ -137,6 +144,7 @@ public class NexusController {
             result.put("message", e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
         }
         result.put("latencyMs", System.currentTimeMillis() - start);
+        log.info("[Nexus] test connection done id={} success={} latencyMs={}", id, result.get("success"), result.get("latencyMs"));
         return ResponseEntity.ok(result);
     }
 

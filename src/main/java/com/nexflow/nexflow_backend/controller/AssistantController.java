@@ -2,6 +2,7 @@ package com.nexflow.nexflow_backend.controller;
 
 import com.nexflow.nexflow_backend.service.AssistantService;
 import com.nexflow.nexflow_backend.service.AssistantService.ChatMessage;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -13,6 +14,7 @@ import java.util.Map;
  * REST endpoint for the NexFlow Assistant chatbot.
  * POST /api/assistant/chat — send a message, get a reply.
  */
+@Slf4j
 @RestController
 @RequestMapping("/api/assistant")
 public class AssistantController {
@@ -60,11 +62,13 @@ public class AssistantController {
 
         try {
             String reply = assistantService.chat(message.trim(), history);
+            log.debug("[Assistant] chat ok replyChars={}", reply != null ? reply.length() : 0);
             return ResponseEntity.ok(Map.of("reply", reply));
         } catch (IllegalStateException e) {
-            // No LLM provider configured
+            log.warn("[Assistant] chat unavailable: {}", e.getMessage());
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         } catch (Exception e) {
+            log.error("[Assistant] chat failed: {}", e.getMessage(), e);
             return ResponseEntity.internalServerError()
                     .body(Map.of("error", "Assistant failed: " + e.getMessage()));
         }

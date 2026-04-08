@@ -73,6 +73,7 @@ public class UserService {
         deliverOtp(user.getEmail(), otp, "NexFlow — your verification code",
                 "Your NexFlow verification code is: " + otp + "\n\nThis code expires in 15 minutes.",
                 "OTP");
+        log.info("[Auth] registered userId={} email={} role={}", user.getId(), user.getEmail(), user.getRole());
         return user;
     }
 
@@ -137,13 +138,26 @@ public class UserService {
         NexUser user = userRepository.findByEmail(email.toLowerCase())
                 .orElseThrow(() -> new IllegalArgumentException("Invalid email or password"));
 
-        if (!user.isEmailVerified()) {
-            throw new IllegalArgumentException("Please verify your email first");
-        }
+        // Check password first — prevents revealing whether an email exists with an unverified account
         if (user.getPasswordHash() == null ||
                 !passwordEncoder.matches(rawPassword, user.getPasswordHash())) {
             throw new IllegalArgumentException("Invalid email or password");
         }
+
+        if (!user.isEmailVerified()) {
+            // Password is correct but email not verified — resend a fresh OTP automatically
+            String otp = generateOtp();
+            user.setOtpCode(otp);
+            user.setOtpExpiresAt(Instant.now().plusSeconds(900));
+            user.setOtpFailedAttempts(0);
+            userRepository.save(user);
+            deliverOtp(user.getEmail(), otp, "NexFlow — your verification code",
+                    "Your NexFlow verification code is: " + otp + "\n\nThis code expires in 15 minutes.",
+                    "OTP");
+            throw new IllegalArgumentException("EMAIL_NOT_VERIFIED:" + user.getEmail());
+        }
+
+        log.info("[Auth] login success userId={} email={}", user.getId(), user.getEmail());
         return user;
     }
 
