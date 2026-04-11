@@ -110,6 +110,7 @@ public class FlowExecutionEngine {
 
         while (!queue.isEmpty()) {
             FlowNode current = queue.poll();
+            // The engine works one node at a time, then chooses what should run next.
             nco.getMeta().setCurrentNodeId(current.getId().toString());
 
             log.debug(
@@ -195,6 +196,8 @@ public class FlowExecutionEngine {
             if (result.getStatus() == NodeStatus.FAILURE) checkOutputFlag = false;
             if (current.getNodeType() == NodeType.SUCCESS && result.getStatus() == NodeStatus.SUCCESS) reachedSuccessTerminal = true;
 
+            // LOOP is the only node type that is allowed to point back to itself on purpose.
+            // Any other cycle is treated as a broken flow.
             // Hard fail-fast for FORK nodes that themselves failed (e.g. onBranchFailure=FAIL_FAST or WAIT_N quorum not met):
             // as soon as the FORK returns FAILURE, stop enqueuing any further nodes.
             if (current.getNodeType() == NodeType.FORK && result.getStatus() == NodeStatus.FAILURE) {
@@ -516,7 +519,8 @@ public class FlowExecutionEngine {
     }
 
     private void injectTriggerPayload(FlowNode startNode, NexflowContextObject nco, Map<String, Object> payload) {
-        // Defensive copy so we own the map and it is never null
+        // START is the only node that gets the original trigger payload.
+        // We store it here once so the main loop does not overwrite it later.
         Map<String, Object> body = payload != null && !payload.isEmpty()
                 ? new HashMap<>(payload)
                 : new HashMap<>();
@@ -779,6 +783,7 @@ public class FlowExecutionEngine {
 
     private void finalizeExecution(NexflowContextObject nco, boolean noFailure, boolean reachedSuccessTerminal) {
         nco.getMeta().setCompletedAt(Instant.now());
+        // Success terminal wins. Otherwise any failure means the overall run fails.
         // If any path reached a SUCCESS terminal (e.g. after JOIN with onBranchFailure=CONTINUE), treat run as SUCCESS
         if (reachedSuccessTerminal) {
             nco.getMeta().setStatus(ExecutionStatus.SUCCESS);

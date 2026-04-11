@@ -19,6 +19,7 @@ public class ExecutionThreadPoolConfig {
     @Bean(name = "flowExecutionExecutor")
     public Executor flowExecutionExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        // This pool runs whole flow executions in the background.
         executor.setCorePoolSize(20);
         executor.setMaxPoolSize(50);
         executor.setQueueCapacity(100);
@@ -38,6 +39,7 @@ public class ExecutionThreadPoolConfig {
     @Bean(name = "forkBranchExecutor")
     public Executor forkBranchExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        // FORK branches use their own pool so parallel branches do not block the main flow pool.
         executor.setCorePoolSize(20);
         executor.setMaxPoolSize(50);
         executor.setQueueCapacity(200);

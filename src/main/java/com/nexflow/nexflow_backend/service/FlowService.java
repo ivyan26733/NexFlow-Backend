@@ -119,6 +119,7 @@ public class FlowService {
                 ? execution.getPayload()
                 : (payload != null ? payload : Map.of());
 
+        // The execution row is already saved. The actual flow work happens on the background executor.
         CompletableFuture<Void> task = CompletableFuture.runAsync(
                 () -> runExecutionInBackground(executionId, execution.getFlowId(), effectivePayload),
                 flowExecutionExecutor
@@ -179,6 +180,7 @@ public class FlowService {
         Execution execution = executionRepository.findById(executionId)
                 .orElseThrow(() -> new IllegalStateException("Execution not found: " + executionId));
         try {
+            // This is the real flow run. If it throws, we mark the execution as failed.
             log.info(
                     "[FlowService] runExecutionInBackground START flowId={} executionId={} triggeredBy={} payloadKeys={}",
                     flowId,
@@ -240,6 +242,7 @@ public class FlowService {
             if (allowedFlowIds != null && !allowedFlowIds.contains(execution.getFlowId())) {
                 continue;
             }
+            // This is the manual cleanup path for executions that are still stuck in RUNNING.
             execution.setStatus(ExecutionStatus.FAILURE);
             execution.setErrorMessage(DISCARDED_ERROR_MESSAGE);
             execution.setCompletedAt(Instant.now());

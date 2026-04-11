@@ -46,6 +46,8 @@ public class PulseController {
         boolean isStudioTrigger = "1".equals(studioTrigger);
         Flow flow = flowRepository.findById(flowId).orElseThrow(() -> new IllegalArgumentException("Flow not found: " + slugOrId));
 
+        // Studio uses a two-step start so the UI can subscribe before the engine begins.
+        // External callers skip that handshake and start immediately.
         log.info(
                 "[Pulse] trigger slugOrId={} flowId={} studio={} flowStatus={} payloadKeys={}",
                 slugOrId,

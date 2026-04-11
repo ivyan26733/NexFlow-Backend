@@ -44,13 +44,46 @@ public class ExecutionEventPublisher {
         publish(executionId, nodeId, NodeStatus.FAILURE, error, null);
     }
 
+    /**
+     * Max bytes allowed per nex value in a WebSocket event.
+     * Values larger than this are replaced with a stub so a single large HTTP
+     * response body does not bloat thousands of RabbitMQ messages during a loop.
+     */
+    private static final int MAX_NEX_VALUE_BYTES = 2048;
+
+    /**
+     * Produces a "safe" copy of the nex map where values whose JSON representation
+     * exceeds MAX_NEX_VALUE_BYTES are replaced with a small stub object.
+     * This keeps WebSocket frames small even when the loop body calls an API that
+     * returns large HTML / JSON payloads.
+     */
+    private Map<String, Object> capNex(Map<String, Object> nex) {
+        if (nex == null || nex.isEmpty()) return nex;
+        Map<String, Object> capped = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : nex.entrySet()) {
+            Object v = entry.getValue();
+            String json;
+            try {
+                json = v instanceof String s ? s : v.toString();
+            } catch (Exception e) {
+                json = "";
+            }
+            if (json.length() > MAX_NEX_VALUE_BYTES) {
+                capped.put(entry.getKey(), Map.of("_truncated", true, "_bytes", json.length()));
+            } else {
+                capped.put(entry.getKey(), v);
+            }
+        }
+        return capped;
+    }
+
     private void publish(String executionId, String nodeId, NodeStatus status, String error, Map<String, Object> nex) {
         Map<String, Object> payload = new java.util.LinkedHashMap<>();
         payload.put("nodeId", nodeId);
         payload.put("status", status.name());
         payload.put("error", error != null ? error : "");
         if (nex != null) {
-            payload.put("nex", nex);
+            payload.put("nex", capNex(nex));
         }
         String destination = TOPIC_PREFIX + executionId;
 

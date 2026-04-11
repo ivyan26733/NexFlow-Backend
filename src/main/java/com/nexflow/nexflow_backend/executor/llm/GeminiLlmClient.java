@@ -100,7 +100,11 @@ public class GeminiLlmClient implements LlmClient {
             Map<String, Object> genConfig = new LinkedHashMap<>();
             genConfig.put("temperature", req.getTemperature());
             genConfig.put("maxOutputTokens", req.getMaxTokens());
-            genConfig.put("responseMimeType", "application/json");
+            // Use JSON mode only for AI node calls that declare an outputSchema.
+            // The assistant chat path leaves outputSchema null → use plain text so
+            // the model returns readable prose instead of a JSON object.
+            boolean wantsJson = req.getOutputSchema() != null && !req.getOutputSchema().isBlank();
+            genConfig.put("responseMimeType", wantsJson ? "application/json" : "text/plain");
 
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("contents", contents);

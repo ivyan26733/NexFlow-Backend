@@ -60,8 +60,14 @@ public class AssistantController {
                     .toList();
         }
 
+        // Optional page context sent by the frontend (e.g. { "path": "/studio/abc", "name": "Studio" })
+        @SuppressWarnings("unchecked")
+        Map<String, String> pageCtx = body.get("pageContext") instanceof Map<?, ?>
+                ? (Map<String, String>) body.get("pageContext")
+                : Collections.emptyMap();
+
         try {
-            String reply = assistantService.chat(message.trim(), history);
+            String reply = assistantService.chat(message.trim(), history, pageCtx);
             log.debug("[Assistant] chat ok replyChars={}", reply != null ? reply.length() : 0);
             return ResponseEntity.ok(Map.of("reply", reply));
         } catch (IllegalStateException e) {

@@ -70,7 +70,12 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             body.put("messages", messages);
             body.put("max_tokens", req.getMaxTokens());
             body.put("temperature", req.getTemperature());
-            body.put("response_format", Map.of("type", "json_object"));
+            // Use JSON mode only when the caller declared an outputSchema (AI nodes).
+            // For assistant chat, outputSchema is null → omit response_format so the
+            // model returns plain prose instead of a JSON object.
+            if (req.getOutputSchema() != null && !req.getOutputSchema().isBlank()) {
+                body.put("response_format", Map.of("type", "json_object"));
+            }
             String jsonBody = mapper.writeValueAsString(body);
             String authHeader = "Bearer " + apiKey;
             HttpRequest httpReq = HttpRequest.newBuilder()

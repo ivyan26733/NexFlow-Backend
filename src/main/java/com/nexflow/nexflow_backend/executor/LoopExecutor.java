@@ -85,8 +85,14 @@ public class LoopExecutor implements NodeExecutor {
                 if (lastCtx != null) {
                     Object previousOutput = lastCtx.getSuccessOutput() != null ? lastCtx.getSuccessOutput() : lastCtx.getOutput();
                     if (loopState.getAccumulated() == null) loopState.setAccumulated(new ArrayList<>());
-                    Object deepCopy = deepCopy(previousOutput);
-                    loopState.getAccumulated().add(deepCopy != null ? deepCopy : previousOutput);
+                    // Cap accumulated to last 100 entries to prevent OOM on high-iteration loops.
+                    // Flows running 1000+ iterations can generate hundreds of MB if each iteration
+                    // produces a large payload (e.g. HTTP response body). Callers that need all
+                    // outputs should write them to a DB node inside the loop body instead.
+                    if (loopState.getAccumulated().size() < 100) {
+                        Object deepCopy = deepCopy(previousOutput);
+                        loopState.getAccumulated().add(deepCopy != null ? deepCopy : previousOutput);
+                    }
                 }
             }
         }

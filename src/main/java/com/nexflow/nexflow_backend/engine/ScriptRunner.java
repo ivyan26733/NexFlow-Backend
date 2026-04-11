@@ -98,6 +98,7 @@ public class ScriptRunner {
     }
 
     public ScriptResult run(String language, String userCode, Object inputData, int timeoutSeconds) {
+        // Clamp the timeout so one bad node config cannot run forever.
         int timeout = Math.min(Math.max(timeoutSeconds, 1), MAX_TIMEOUT_SECONDS);
         return switch (language.toLowerCase()) {
             case "javascript" -> {
@@ -196,6 +197,7 @@ public class ScriptRunner {
             // ── Layer 1: CPU watchdog ─────────────────────────────────────────
             AtomicBoolean infiniteLoopKilled = new AtomicBoolean(false);
             Thread watchdog = startCpuWatchdog(process, infiniteLoopKilled);
+            // The watchdog watches CPU usage. The waitFor() call below is the wall-clock timeout.
 
             // ── Layer 2: wall-clock timeout ───────────────────────────────────
             boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
@@ -321,6 +323,7 @@ public class ScriptRunner {
 
                 if (cpuRate >= CPU_HIGH_THRESHOLD) {
                     consecutiveHighSamples++;
+                    // One sample is not enough. We only kill after sustained high CPU.
                     log.debug("[CpuWatchdog] High CPU sample #{} — rate={:.0f}%%", consecutiveHighSamples, cpuRate * 100);
                 } else {
                     consecutiveHighSamples = 0; // reset — CPU dropped, not an infinite loop

@@ -28,6 +28,19 @@ services:
       retries: 10
       start_period: 20s
 
+  # ── Redis (dashboard cache) ───────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: nexflow-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # ── RabbitMQ ──────────────────────────────────────────────────────────────
   rabbitmq:
     image: rabbitmq:3-management

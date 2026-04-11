@@ -61,6 +61,8 @@ public class SecurityConfig {
                 // Auth endpoints (public)
                 .requestMatchers("/api/auth/**").permitAll()
                 // External webhook triggers (public — rate-limited by RateLimitFilter)
+                // Pulse is public on purpose so curl, webhooks, and JMeter can trigger flows.
+                // The rate limit filter still protects it from abuse.
                 .requestMatchers("/api/pulse/**").permitAll()
                 // Actuator health only
                 .requestMatchers("/actuator/health").permitAll()

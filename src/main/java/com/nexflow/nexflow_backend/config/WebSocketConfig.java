@@ -55,8 +55,12 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
                     .setSystemLogin(rabbitUsername)
                     .setSystemPasscode(rabbitPassword)
                     .setVirtualHost(rabbitVirtualHost)
-                    .setSystemHeartbeatSendInterval(10_000)
-                    .setSystemHeartbeatReceiveInterval(10_000);
+                    // Heartbeats disabled: Reactor Netty TCP does not reliably send STOMP
+                    // heartbeat frames, causing RabbitMQ to close the connection every ~60s
+                    // and drop all in-flight execution events. On a co-located Docker network
+                    // (same EC2 host) the TCP connection itself is sufficient liveness signal.
+                    .setSystemHeartbeatSendInterval(0)
+                    .setSystemHeartbeatReceiveInterval(0);
         } else {
             // For the in-memory simple broker we don't need explicit heartbeats.
             // Avoid configuring them to prevent requiring a TaskScheduler in tests.

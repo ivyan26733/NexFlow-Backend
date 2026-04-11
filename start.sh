@@ -51,7 +51,7 @@ fi
 # ── Launch ────────────────────────────────────────────────────────────────────
 echo "Starting NexFlow backend… (logs → $LOG_FILE)"
 nohup java \
-  -Xms256m -Xmx512m \
+  -Xms512m -Xmx1280m \
   -jar "$JAR_FILE" \
   --spring.profiles.active=prod \
   --management.health.mail.enabled=false \

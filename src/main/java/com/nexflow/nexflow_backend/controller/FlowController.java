@@ -41,6 +41,7 @@ public class FlowController {
     public List<FlowResponse> getAllFlows(@AuthenticationPrincipal NexUser user) {
         if (user == null) return List.of();
         List<Flow> all = flowRepository.findAll();
+        // Admins see every flow. Everyone else only sees flows they can access.
         if (user.getRole() == UserRole.ADMIN) {
             log.debug("[Flow] listAll userId={} (admin) total={}", user.getId(), all.size());
             return all.stream().map(this::toFlowResponse).toList();
@@ -56,6 +57,7 @@ public class FlowController {
     @PostMapping
     public ResponseEntity<FlowResponse> createFlow(@RequestBody Flow flow, @AuthenticationPrincipal NexUser user) {
         if (user == null) return ResponseEntity.status(401).build();
+        // Create the flow record first. The canvas nodes and edges are saved separately.
         flow.setUserId(user.getId());
         if (flow.getSlug() == null || flow.getSlug().isBlank()) {
             flow.setSlug(toSlug(flow.getName()));
@@ -187,6 +189,7 @@ public class FlowController {
         if (flow == null) return ResponseEntity.notFound().build();
         if (!isOwnerOrAdmin(flow, user)) return ResponseEntity.status(403).build();
 
+        // Save is replace-all: remove the old canvas rows, then insert the latest snapshot.
         String saveOutputAsError = validateSaveOutputAs(dto.nodes());
         if (saveOutputAsError != null) {
             return ResponseEntity.badRequest().body(Map.of("error", saveOutputAsError));
@@ -296,6 +299,117 @@ public class FlowController {
         return executionRepository.findByFlowIdOrderByStartedAtDesc(flowId);
     }
 
+    // ─── EXPORT ──────────────────────────────────────────────────────────────
+
+    /** Export a flow bundle: flow metadata + canvas (nodes + edges). No transaction history. */
+    @GetMapping("/{flowId}/export")
+    public ResponseEntity<?> exportFlow(@PathVariable UUID flowId,
+                                        @AuthenticationPrincipal NexUser user) {
+        Flow flow = flowRepository.findById(flowId).orElse(null);
+        if (flow == null) return ResponseEntity.notFound().build();
+        if (user == null || !groupService.hasFlowAccess(flow.getId(), flow.getUserId(), user))
+            return ResponseEntity.status(403).build();
+
+        List<FlowNode> nodes = nodeRepository.findByFlowId(flowId);
+        List<FlowEdge> edges = edgeRepository.findByFlowId(flowId);
+
+        FlowBundle bundle = new FlowBundle(
+            "1.0",
+            Instant.now().toString(),
+            new FlowBundle.FlowExport(flow.getName(), flow.getSlug(), flow.getDescription(), flow.getStatus().name()),
+            nodes.stream().map(n -> new FlowNodeDto(
+                n.getId().toString(), n.getFlowId().toString(),
+                n.getNodeType(), n.getLabel(), n.getConfig(),
+                n.getPositionX(), n.getPositionY()
+            )).toList(),
+            edges.stream().map(e -> new FlowEdgeDto(
+                e.getId().toString(), e.getFlowId().toString(),
+                e.getSourceNodeId().toString(), e.getTargetNodeId().toString(),
+                e.getSourceHandle(), e.getTargetHandle(),
+                e.getConditionType() != null ? e.getConditionType().name() : null,
+                e.getConditionExpr()
+            )).toList()
+        );
+
+        log.info("[Flow] export flowId={} userId={} nodes={} edges={}",
+                flowId, user.getId(), nodes.size(), edges.size());
+        return ResponseEntity.ok().body(bundle);
+    }
+
+    // ─── IMPORT ──────────────────────────────────────────────────────────────
+
+    /** Import a flow bundle: creates a new flow (always as DRAFT) with fresh UUIDs. */
+    @Transactional
+    @PostMapping("/import")
+    public ResponseEntity<?> importFlow(@RequestBody FlowBundle bundle,
+                                        @AuthenticationPrincipal NexUser user) {
+        if (user == null) return ResponseEntity.status(401).build();
+        if (bundle == null || bundle.flow() == null) return ResponseEntity.badRequest().body(Map.of("error", "Invalid bundle"));
+
+        // Create the new flow, always as DRAFT regardless of source status
+        Flow flow = new Flow();
+        flow.setName(bundle.flow().name());
+        flow.setDescription(bundle.flow().description());
+        flow.setStatus(com.nexflow.nexflow_backend.FlowStatus.DRAFT);
+        flow.setUserId(user.getId());
+
+        // Handle slug conflicts the same way as createFlow
+        String base = (bundle.flow().slug() != null && !bundle.flow().slug().isBlank())
+                ? bundle.flow().slug() : toSlug(bundle.flow().name());
+        flow.setSlug(base);
+        int counter = 1;
+        while (flowRepository.existsBySlug(flow.getSlug())) {
+            flow.setSlug(base + "-" + counter++);
+        }
+
+        Flow saved = flowRepository.save(flow);
+
+        // Build old-id → new-UUID map so edges can be remapped
+        Map<String, UUID> nodeIdMap = new java.util.HashMap<>();
+        if (bundle.nodes() != null) {
+            for (FlowNodeDto n : bundle.nodes()) {
+                UUID newId = UUID.randomUUID();
+                if (n.id() != null) nodeIdMap.put(n.id(), newId);
+
+                FlowNode node = new FlowNode();
+                node.setId(newId);
+                node.setFlowId(saved.getId());
+                node.setNodeType(n.nodeType());
+                node.setLabel(n.label() != null ? n.label() : "");
+                node.setConfig(n.config() != null ? n.config() : new java.util.HashMap<>());
+                node.setPositionX(n.positionX() != null ? n.positionX() : 0.0);
+                node.setPositionY(n.positionY() != null ? n.positionY() : 0.0);
+                nodeRepository.save(node);
+            }
+        }
+
+        if (bundle.edges() != null) {
+            for (FlowEdgeDto e : bundle.edges()) {
+                UUID newSrc = e.sourceNodeId() != null ? nodeIdMap.get(e.sourceNodeId()) : null;
+                UUID newTgt = e.targetNodeId() != null ? nodeIdMap.get(e.targetNodeId()) : null;
+                if (newSrc == null || newTgt == null) continue;
+
+                FlowEdge edge = new FlowEdge();
+                edge.setId(UUID.randomUUID());
+                edge.setFlowId(saved.getId());
+                edge.setSourceNodeId(newSrc);
+                edge.setTargetNodeId(newTgt);
+                edge.setSourceHandle(e.sourceHandle());
+                edge.setTargetHandle(e.targetHandle());
+                edge.setConditionType(parseEdgeCondition(e.conditionType()));
+                edge.setConditionExpr(e.conditionExpr());
+                edgeRepository.save(edge);
+            }
+        }
+
+        recordActivity(saved.getId(), user.getId(), "FLOW_IMPORTED");
+        log.info("[Flow] imported flowId={} userId={} name='{}' nodes={} edges={}",
+                saved.getId(), user.getId(), saved.getName(),
+                bundle.nodes() != null ? bundle.nodes().size() : 0,
+                bundle.edges() != null ? bundle.edges().size() : 0);
+        return ResponseEntity.ok(toFlowResponse(saved));
+    }
+
     /**
      * Delete a flow (\"studio\") and all of its persisted state:
      * - all executions/transactions for this flow
@@ -314,6 +428,7 @@ public class FlowController {
         if (flow == null) return ResponseEntity.notFound().build();
         if (!isOwnerOrAdmin(flow, user)) return ResponseEntity.status(403).build();
 
+        // Removing the flow also removes its executions, nodes, and edges.
         executionRepository.deleteAll(executionRepository.findByFlowIdOrderByStartedAtDesc(flowId));
         nodeRepository.deleteAll(nodeRepository.findByFlowId(flowId));
         edgeRepository.deleteAll(edgeRepository.findByFlowId(flowId));
@@ -332,6 +447,22 @@ public class FlowController {
 
     /** Response type for GET canvas; also used internally for the saved entities. */
     public record CanvasSaveRequest(List<FlowNode> nodes, List<FlowEdge> edges) {}
+
+    /** Portable flow bundle used for import/export (no transaction history). */
+    public record FlowBundle(
+            String version,
+            String exportedAt,
+            FlowExport flow,
+            List<FlowNodeDto> nodes,
+            List<FlowEdgeDto> edges
+    ) {
+        public record FlowExport(
+                String name,
+                String slug,
+                String description,
+                String status
+        ) {}
+    }
 
     /** Public flow payload with derived creator name for UI cards. */
     public record FlowResponse(
