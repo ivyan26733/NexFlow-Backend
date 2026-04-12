@@ -86,11 +86,14 @@ public class SecurityConfig {
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
 
-        // Start with hardcoded safe defaults (Vercel + local dev)
+        // Start with hardcoded safe defaults (Vercel + Cloudflare tunnels + local dev)
         List<String> base = new java.util.ArrayList<>(List.of(
                 "http://localhost:3000",
                 "http://localhost:3001",
-                "https://*.vercel.app"          // always allow Vercel frontend deploys
+                "https://*.vercel.app",          // Vercel frontend deploys
+                "https://*.trycloudflare.com",   // Cloudflare Tunnel (dev/staging)
+                "https://*.ngrok-free.app",      // ngrok tunnels
+                "https://*.ngrok.io"             // ngrok legacy
         ));
 
         // Merge in any extra origins from app.cors.allowed-origins
