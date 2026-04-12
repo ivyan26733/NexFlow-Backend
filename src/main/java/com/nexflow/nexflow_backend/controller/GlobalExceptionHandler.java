@@ -6,6 +6,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
 
 import java.util.Map;
 
@@ -16,6 +17,18 @@ import java.util.Map;
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    /**
+     * Client disconnected before the response was written (browser navigation,
+     * React StrictMode double-invoke, hot-reload, etc.). The request was fully
+     * processed — only the TCP write failed. Log at DEBUG so it never pollutes
+     * production error dashboards.
+     */
+    @ExceptionHandler(AsyncRequestNotUsableException.class)
+    public void handleClientDisconnect(AsyncRequestNotUsableException ex, HttpServletRequest req) {
+        log.debug("[client-disconnect] {} — {}", req.getRequestURI(), ex.getMessage());
+        // Nothing to return — the socket is already closed.
+    }
 
     /** 400 — expected validation failures */
     @ExceptionHandler(IllegalArgumentException.class)

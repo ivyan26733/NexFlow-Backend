@@ -86,16 +86,20 @@ public class SecurityConfig {
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
 
-        List<String> origins = Arrays.stream(allowedOrigins.split("\\s*,\\s*"))
+        // Start with hardcoded safe defaults (Vercel + local dev)
+        List<String> base = new java.util.ArrayList<>(List.of(
+                "http://localhost:3000",
+                "http://localhost:3001",
+                "https://*.vercel.app"          // always allow Vercel frontend deploys
+        ));
+
+        // Merge in any extra origins from app.cors.allowed-origins
+        Arrays.stream(allowedOrigins.split("\\s*,\\s*"))
                 .map(String::trim)
                 .filter(s -> !s.isBlank())
-                .toList();
+                .forEach(base::add);
 
-        if (origins.isEmpty()) {
-            origins = List.of("http://localhost:3000", "http://localhost:3001");
-        }
-
-        config.setAllowedOriginPatterns(origins);
+        config.setAllowedOriginPatterns(base);
         config.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
         config.setAllowedHeaders(List.of(
                 "Authorization", "Content-Type", "Accept",
