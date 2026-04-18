@@ -43,8 +43,15 @@ public class SecurityConfig {
             .csrf(AbstractHttpConfigurer::disable)
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .exceptionHandling(e -> e
-                .authenticationEntryPoint((req, res, ex) ->
-                    res.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Unauthorized"))
+                // Write 401 directly — sendError() triggers an error dispatch that
+                // loses CORS headers set by CorsFilter, causing browsers to report
+                // a CORS error instead of a 401.
+                .authenticationEntryPoint((req, res, ex) -> {
+                    res.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                    res.setContentType("application/json");
+                    res.setCharacterEncoding("UTF-8");
+                    res.getWriter().write("{\"error\":\"Unauthorized\"}");
+                })
             )
             .headers(headers -> headers
                 .frameOptions(HeadersConfigurer.FrameOptionsConfig::deny)

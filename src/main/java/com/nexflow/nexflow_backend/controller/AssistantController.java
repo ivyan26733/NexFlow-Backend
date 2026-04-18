@@ -1,9 +1,11 @@
 package com.nexflow.nexflow_backend.controller;
 
+import com.nexflow.nexflow_backend.model.domain.NexUser;
 import com.nexflow.nexflow_backend.service.AssistantService;
 import com.nexflow.nexflow_backend.service.AssistantService.ChatMessage;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Collections;
@@ -36,7 +38,8 @@ public class AssistantController {
      *   { "reply": "The VARIABLE node lets you define..." }
      */
     @PostMapping("/chat")
-    public ResponseEntity<Map<String, String>> chat(@RequestBody Map<String, Object> body) {
+    public ResponseEntity<Map<String, String>> chat(@RequestBody Map<String, Object> body,
+                                                     @AuthenticationPrincipal NexUser user) {
         String message = (String) body.get("message");
         if (message == null || message.trim().length() < 2) {
             return ResponseEntity.badRequest()
@@ -66,8 +69,12 @@ public class AssistantController {
                 ? (Map<String, String>) body.get("pageContext")
                 : Collections.emptyMap();
 
+        if (user == null) {
+            return ResponseEntity.status(401).body(Map.of("error", "Authentication required"));
+        }
+
         try {
-            String reply = assistantService.chat(message.trim(), history, pageCtx);
+            String reply = assistantService.chat(message.trim(), history, pageCtx, user.getId());
             log.debug("[Assistant] chat ok replyChars={}", reply != null ? reply.length() : 0);
             return ResponseEntity.ok(Map.of("reply", reply));
         } catch (IllegalStateException e) {

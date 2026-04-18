@@ -63,8 +63,8 @@ public class FlowExecutionEngine {
     /** Hard cap on node executions per run to avoid infinite loops; does not kill the process, just exits cleanly. */
     private static final int MAX_NODE_EXECUTIONS = 5_000;
 
-    public NexflowContextObject execute(UUID flowId, String executionId, Map<String, Object> triggerPayload) {
-        NexflowContextObject nco = NexflowContextObject.create(flowId.toString(), executionId);
+    public NexflowContextObject execute(UUID flowId, String executionId, Map<String, Object> triggerPayload, UUID userId) {
+        NexflowContextObject nco = NexflowContextObject.create(flowId.toString(), executionId, userId);
 
         log.info(
                 "[FlowExecutionEngine] START executionId={} flowId={} triggerKeys={}",

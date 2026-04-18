@@ -14,6 +14,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 @Data
 @Builder
@@ -51,11 +52,12 @@ public class NexflowContextObject {
     private List<FlowNode> flowNodes;
 
 //    Factory Method
-    public static NexflowContextObject create(String flowId, String executionId) {
+    public static NexflowContextObject create(String flowId, String executionId, UUID userId) {
         return NexflowContextObject.builder()
                 .meta(NcoMeta.builder()
                         .flowId(flowId)
                         .executionId(executionId)
+                        .userId(userId)
                         .startedAt(Instant.now())
                         .status(ExecutionStatus.RUNNING)
                         .build())

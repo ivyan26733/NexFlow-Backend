@@ -5,15 +5,21 @@ import java.time.LocalDateTime;
 import java.util.UUID;
 
 @Entity
-@Table(name = "llm_provider_configs")
+@Table(
+    name = "llm_provider_configs",
+    uniqueConstraints = @jakarta.persistence.UniqueConstraint(columnNames = {"user_id", "provider"})
+)
 public class LlmProviderConfig {
 
     @Id
     @GeneratedValue
     private UUID id;
 
+    @Column(name = "user_id", nullable = false)
+    private UUID userId;
+
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false, unique = true)
+    @Column(nullable = false)
     private LlmProvider provider;
 
     @Column(name = "api_key", nullable = false)
@@ -35,6 +41,7 @@ public class LlmProviderConfig {
     void onUpdate() { this.updatedAt = LocalDateTime.now(); }
 
     public UUID getId() { return id; }
+    public UUID getUserId() { return userId; }
     public LlmProvider getProvider() { return provider; }
     public String getApiKey() { return apiKey; }
     public String getCustomEndpoint() { return customEndpoint; }
@@ -43,6 +50,7 @@ public class LlmProviderConfig {
     public LocalDateTime getUpdatedAt() { return updatedAt; }
 
     public void setId(UUID id) { this.id = id; }
+    public void setUserId(UUID userId) { this.userId = userId; }
     public void setProvider(LlmProvider provider) { this.provider = provider; }
     public void setApiKey(String apiKey) { this.apiKey = apiKey; }
     public void setCustomEndpoint(String ep) { this.customEndpoint = ep; }

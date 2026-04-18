@@ -189,7 +189,10 @@ public class FlowService {
                     payload != null ? payload.keySet() : "null"
             );
 
-            NexflowContextObject nco = engine.execute(flowId, executionId.toString(), payload);
+            UUID flowOwnerId = flowRepository.findById(flowId)
+                    .map(f -> f.getUserId())
+                    .orElse(null);
+            NexflowContextObject nco = engine.execute(flowId, executionId.toString(), payload, flowOwnerId);
             Execution latest = executionRepository.findById(executionId).orElse(execution);
             if (isExternallyFinalized(latest)) {
                 log.info("[FlowService] runExecutionInBackground skip finalize: executionId={} already finalized", executionId);

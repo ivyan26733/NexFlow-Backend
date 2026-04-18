@@ -8,12 +8,15 @@ import lombok.Data;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 
 @Data
 @Builder
 public class NcoMeta {
     private String flowId;
     private String executionId;
+    /** UUID of the user who owns the flow being executed. Used to look up per-user LLM configs. */
+    private UUID userId;
     private String currentNodeId;
     private Instant startedAt;
     private Instant completedAt;

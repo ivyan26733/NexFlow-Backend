@@ -12,6 +12,14 @@ import java.util.UUID;
 @Repository
 public interface LlmProviderConfigRepository extends JpaRepository<LlmProviderConfig, UUID> {
 
+    // ── Per-user queries (all new code uses these) ───────────────────────────
+    List<LlmProviderConfig> findByUserId(UUID userId);
+
+    Optional<LlmProviderConfig> findByUserIdAndProvider(UUID userId, LlmProvider provider);
+
+    List<LlmProviderConfig> findByUserIdAndEnabledTrue(UUID userId);
+
+    // ── Legacy global queries (kept for AiNodeExecutor fallback only) ────────
     Optional<LlmProviderConfig> findByProvider(LlmProvider provider);
 
     List<LlmProviderConfig> findByEnabledTrue();

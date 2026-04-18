@@ -4,7 +4,6 @@ import com.nexflow.nexflow_backend.executor.llm.LlmClientFactory;
 import com.nexflow.nexflow_backend.model.domain.LlmProvider;
 import com.nexflow.nexflow_backend.model.domain.LlmProviderConfig;
 import com.nexflow.nexflow_backend.model.domain.NexUser;
-import com.nexflow.nexflow_backend.model.domain.UserRole;
 import com.nexflow.nexflow_backend.repository.LlmProviderConfigRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -31,8 +30,8 @@ public class LlmProviderConfigController {
 
     @GetMapping
     public List<Map<String, Object>> listProviders(@AuthenticationPrincipal NexUser user) {
-        boolean isAdmin = user != null && user.getRole() == UserRole.ADMIN;
-        Map<LlmProvider, LlmProviderConfig> saved = repo.findAll()
+        requireUser(user);
+        Map<LlmProvider, LlmProviderConfig> saved = repo.findByUserId(user.getId())
                 .stream()
                 .collect(Collectors.toMap(LlmProviderConfig::getProvider, c -> c));
 
@@ -54,10 +53,9 @@ public class LlmProviderConfigController {
                     if (cfg != null) {
                         entry.put("configured", true);
                         entry.put("enabled", cfg.isEnabled());
-                        // Only ADMIN sees the masked key and config metadata
-                        entry.put("apiKeyMasked", isAdmin ? maskKey(cfg.getApiKey()) : null);
-                        entry.put("customEndpoint", isAdmin ? cfg.getCustomEndpoint() : null);
-                        entry.put("configId", isAdmin ? cfg.getId() : null);
+                        entry.put("apiKeyMasked", maskKey(cfg.getApiKey()));
+                        entry.put("customEndpoint", cfg.getCustomEndpoint());
+                        entry.put("configId", cfg.getId());
                     } else {
                         entry.put("configured", false);
                         entry.put("enabled", false);
@@ -73,7 +71,7 @@ public class LlmProviderConfigController {
     @PostMapping
     public ResponseEntity<Map<String, Object>> saveProvider(@RequestBody Map<String, Object> body,
                                                              @AuthenticationPrincipal NexUser user) {
-        requireAdmin(user);
+        requireUser(user);
         String providerStr = (String) body.get("provider");
         String apiKey = (String) body.get("apiKey");
         String endpoint = (String) body.get("customEndpoint");
@@ -97,14 +95,15 @@ public class LlmProviderConfigController {
             apiKey = "free";
         }
 
-        LlmProviderConfig cfg = repo.findByProvider(provider).orElseGet(LlmProviderConfig::new);
+        LlmProviderConfig cfg = repo.findByUserIdAndProvider(user.getId(), provider).orElseGet(LlmProviderConfig::new);
+        cfg.setUserId(user.getId());
         cfg.setProvider(provider);
         cfg.setApiKey(apiKey);
         cfg.setCustomEndpoint(endpoint);
         cfg.setEnabled(true);
 
         LlmProviderConfig saved = repo.save(cfg);
-        log.info("[LLM] provider saved provider={} enabled={}", saved.getProvider().name(), saved.isEnabled());
+        log.info("[LLM] provider saved userId={} provider={} enabled={}", user.getId(), saved.getProvider().name(), saved.isEnabled());
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("success", true);
@@ -118,13 +117,13 @@ public class LlmProviderConfigController {
     @PatchMapping("/{provider}/toggle")
     public ResponseEntity<Map<String, Object>> toggleProvider(@PathVariable String provider,
                                                                @AuthenticationPrincipal NexUser user) {
-        requireAdmin(user);
+        requireUser(user);
         LlmProvider p = parseProvider(provider);
-        LlmProviderConfig cfg = repo.findByProvider(p)
+        LlmProviderConfig cfg = repo.findByUserIdAndProvider(user.getId(), p)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Provider not configured: " + provider));
         cfg.setEnabled(!cfg.isEnabled());
         repo.save(cfg);
-        log.info("[LLM] provider toggled provider={} enabled={}", p.name(), cfg.isEnabled());
+        log.info("[LLM] provider toggled userId={} provider={} enabled={}", user.getId(), p.name(), cfg.isEnabled());
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("provider", p.name());
         response.put("enabled", cfg.isEnabled());
@@ -134,19 +133,19 @@ public class LlmProviderConfigController {
     @DeleteMapping("/{provider}")
     public ResponseEntity<Void> deleteProvider(@PathVariable String provider,
                                                 @AuthenticationPrincipal NexUser user) {
-        requireAdmin(user);
+        requireUser(user);
         LlmProvider p = parseProvider(provider);
-        repo.findByProvider(p).ifPresent(repo::delete);
-        log.info("[LLM] provider deleted provider={}", p.name());
+        repo.findByUserIdAndProvider(user.getId(), p).ifPresent(repo::delete);
+        log.info("[LLM] provider deleted userId={} provider={}", user.getId(), p.name());
         return ResponseEntity.noContent().build();
     }
 
     @PostMapping("/{provider}/test")
     public ResponseEntity<Map<String, Object>> testProvider(@PathVariable String provider,
                                                              @AuthenticationPrincipal NexUser user) {
-        requireAdmin(user);
+        requireUser(user);
         LlmProvider p = parseProvider(provider);
-        LlmProviderConfig cfg = repo.findByProvider(p)
+        LlmProviderConfig cfg = repo.findByUserIdAndProvider(user.getId(), p)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Provider not configured: " + provider));
 
         try {
@@ -175,9 +174,9 @@ public class LlmProviderConfigController {
         }
     }
 
-    private void requireAdmin(NexUser user) {
-        if (user == null || user.getRole() != UserRole.ADMIN) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Only admins can manage AI provider configurations");
+    private void requireUser(NexUser user) {
+        if (user == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Authentication required");
         }
     }
 

@@ -16,6 +16,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * NexFlow Assistant - chat service.
@@ -42,12 +43,12 @@ public class AssistantService {
      * Send a user message (with optional conversation history and page context) to the LLM
      * and return the assistant's plain-text reply.
      */
-    public String chat(String message, List<ChatMessage> history, Map<String, String> pageContext) {
-        LlmProviderConfig config = providerConfigRepo.findAll().stream()
-                .filter(LlmProviderConfig::isEnabled)
+    public String chat(String message, List<ChatMessage> history, Map<String, String> pageContext, UUID userId) {
+        // Use the requesting user's own enabled providers first
+        LlmProviderConfig config = providerConfigRepo.findByUserIdAndEnabledTrue(userId).stream()
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException(
-                        "No LLM provider configured. Go to Settings -> AI Providers and add one."));
+                        "No LLM provider configured. Go to Settings → AI Providers and add one."));
 
         LlmClient client = clientFactory.getClient(config.getProvider());
 

@@ -79,7 +79,11 @@ public class AiNodeExecutor implements NodeExecutor {
             return failure(node.getId().toString(), Map.of(), "Unknown LLM provider: '" + providerStr + "'.");
         }
 
-        Optional<LlmProviderConfig> providerCfgOpt = providerConfigRepo.findByProvider(provider);
+        // Look up the flow owner's config first; fall back to any global config for backward compat
+        java.util.UUID flowOwnerId = nco.getMeta().getUserId();
+        Optional<LlmProviderConfig> providerCfgOpt = (flowOwnerId != null)
+                ? providerConfigRepo.findByUserIdAndProvider(flowOwnerId, provider)
+                : providerConfigRepo.findByProvider(provider);
         if (providerCfgOpt.isEmpty() || !providerCfgOpt.get().isEnabled()) {
             return failure(node.getId().toString(), Map.of(),
                 "No API key configured for provider '" + provider.getDisplayName() + "'. Go to Settings → AI Providers and add your key.");
