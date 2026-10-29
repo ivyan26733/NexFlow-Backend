@@ -2,6 +2,7 @@ package com.nexflow.nexflow_backend.executor.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nexflow.nexflow_backend.repository.NodeExecutor;
+import com.nexflow.nexflow_backend.engine.FriendlyErrors;
 import com.nexflow.nexflow_backend.executor.ReferenceResolver;
 import com.nexflow.nexflow_backend.model.domain.FlowNode;
 import com.nexflow.nexflow_backend.model.domain.NodeType;
@@ -77,7 +78,7 @@ public class NexusExecutor implements NodeExecutor {
                 .orElse(null);
 
         if (connector == null) {
-            return failureContext(nodeId, null, "Connector not found: " + connectorId);
+            return failureContext(nodeId, null, "The saved connector this step uses no longer exists. Pick another connector.", null);
         }
 
         return "JDBC".equalsIgnoreCase(connector.getConnectorType())
@@ -85,117 +86,71 @@ public class NexusExecutor implements NodeExecutor {
                 : executeRest(nodeId, connector, config, nco);
     }
 
-    /** Inline HTTP (no connector): config has url, method, headers, body. Same output shape as connector REST for compatibility. */
+    /** Inline HTTP (no connector): config has url, method, headers, body. */
     @SuppressWarnings("unchecked")
     private NodeContext executeInlineRest(String nodeId, Map<String, Object> config, NexflowContextObject nco) {
-        if (config == null) return failureContext(nodeId, null, "NEXUS inline HTTP: no config");
-        String url    = resolver.resolve((String) config.get("url"), nco);
-        String method = (String) config.getOrDefault("method", "GET");
+        if (config == null) return failureContext(nodeId, null, "This step has no request configured yet.", null);
+        String url = resolver.resolve((String) config.get("url"), nco);
         if (url == null || url.isBlank()) {
-            return failureContext(nodeId, null, "NEXUS inline HTTP: url is required");
+            return failureContext(nodeId, null, "This step has no URL. Open it and enter the address to call.", null);
         }
         Map<String, Object> headers = resolver.resolveMap((Map<String, Object>) config.getOrDefault("headers", new HashMap<>()), nco);
-        Map<String, Object> body   = resolver.resolveMap((Map<String, Object>) config.getOrDefault("body", new HashMap<>()), nco);
-
-        try {
-            HttpHeaders httpHeaders = new HttpHeaders();
-            httpHeaders.setContentType(MediaType.APPLICATION_JSON);
-            headers.forEach((k, v) -> httpHeaders.set(k, String.valueOf(v)));
-
-            HttpEntity<Map<String, Object>> request = new HttpEntity<>(body, httpHeaders);
-            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.valueOf(method.toUpperCase()), request, String.class);
-
-            Map<String, Object> successOutput = new LinkedHashMap<>();
-            successOutput.put("statusCode", response.getStatusCode().value());
-            successOutput.put("body",       parseBody(response.getBody()));
-            successOutput.put("headers",    response.getHeaders().toSingleValueMap());
-
-            return NodeContext.builder()
-                    .nodeId(nodeId).nodeType(NodeType.NEXUS.name())
-                    .status(NodeStatus.SUCCESS)
-                    .input(Map.of("url", url, "method", method, "body", body))
-                    .successOutput(successOutput)
-                    .build();
-
-        } catch (HttpStatusCodeException ex) {
-            Map<String, Object> failureOutput = new LinkedHashMap<>();
-            failureOutput.put("statusCode", ex.getStatusCode().value());
-            failureOutput.put("body",       parseBody(ex.getResponseBodyAsString()));
-            failureOutput.put("error",      ex.getMessage());
-            return NodeContext.builder()
-                    .nodeId(nodeId).nodeType(NodeType.NEXUS.name())
-                    .status(NodeStatus.FAILURE)
-                    .input(Map.of("url", url, "method", method, "body", body))
-                    .failureOutput(failureOutput)
-                    .errorMessage(ex.getMessage())
-                    .build();
-        } catch (Exception ex) {
-            log.error("NEXUS inline HTTP node {} failed: {}", nodeId, ex.getMessage());
-            return failureContext(nodeId, Map.of("url", url, "method", method), ex.getMessage());
-        }
+        Map<String, Object> body = resolver.resolveMap((Map<String, Object>) config.getOrDefault("body", new HashMap<>()), nco);
+        return callHttp(nodeId, url, (String) config.getOrDefault("method", "GET"), headers, body);
     }
 
     // ── REST execution ────────────────────────────────────────────────────────
 
+    /** Connector REST: connector baseUrl + auth + default headers, overridden by the node's path/headers/body. */
     @SuppressWarnings("unchecked")
     private NodeContext executeRest(String nodeId, NexusConnector connector,
                                     Map<String, Object> config, NexflowContextObject nco) {
+        String path = resolver.resolve((String) config.getOrDefault("path", ""), nco);
+        Map<String, Object> headers = new LinkedHashMap<>();
+        if (connector.getDefaultHeaders() != null) headers.putAll(connector.getDefaultHeaders());
+        headers.putAll(resolver.resolveMap((Map<String, Object>) config.getOrDefault("headers", new HashMap<>()), nco));
+        applyAuth(connector, headers);
+        Map<String, Object> body = resolver.resolveMap((Map<String, Object>) config.getOrDefault("body", new HashMap<>()), nco);
+        return callHttp(nodeId, buildUrl(connector.getBaseUrl(), path), (String) config.getOrDefault("method", "GET"), headers, body);
+    }
 
-        // Resolve path and build full URL
-        String path   = resolver.resolve((String) config.getOrDefault("path", ""), nco);
-        String method = (String) config.getOrDefault("method", "GET");
-        String url    = buildUrl(connector.getBaseUrl(), path);
-
-        // Merge headers: connector defaults → node overrides
-        Map<String, Object> mergedHeaders = new LinkedHashMap<>();
-        if (connector.getDefaultHeaders() != null) mergedHeaders.putAll(connector.getDefaultHeaders());
-        Map<String, Object> nodeHeaders = (Map<String, Object>) config.getOrDefault("headers", new HashMap<>());
-        mergedHeaders.putAll(resolver.resolveMap(nodeHeaders, nco));
-
-        // Apply auth on top
-        applyAuth(connector, mergedHeaders);
-
-        Map<String, Object> body = resolver.resolveMap(
-                (Map<String, Object>) config.getOrDefault("body", new HashMap<>()), nco);
-
+    /** Fires one HTTP call. 2xx → SUCCESS {statusCode, body, headers}; anything else → FAILURE with a friendly reason. */
+    private NodeContext callHttp(String nodeId, String url, String method,
+                                 Map<String, Object> headers, Map<String, Object> body) {
+        Map<String, Object> input = Map.of("url", url, "method", method, "body", body);
         try {
             HttpHeaders httpHeaders = new HttpHeaders();
             httpHeaders.setContentType(MediaType.APPLICATION_JSON);
-            mergedHeaders.forEach((k, v) -> httpHeaders.set(k, String.valueOf(v)));
-
-            HttpEntity<Map<String, Object>> request = new HttpEntity<>(body, httpHeaders);
+            headers.forEach((k, v) -> httpHeaders.set(k, String.valueOf(v)));
             ResponseEntity<String> response = restTemplate.exchange(
-                    url, HttpMethod.valueOf(method.toUpperCase()), request, String.class);
+                    url, HttpMethod.valueOf(method.toUpperCase()), new HttpEntity<>(body, httpHeaders), String.class);
 
             Map<String, Object> successOutput = new LinkedHashMap<>();
             successOutput.put("statusCode", response.getStatusCode().value());
-            successOutput.put("body",       parseBody(response.getBody()));
-            successOutput.put("headers",    response.getHeaders().toSingleValueMap());
-
+            successOutput.put("body", parseBody(response.getBody()));
+            successOutput.put("headers", response.getHeaders().toSingleValueMap());
             return NodeContext.builder()
                     .nodeId(nodeId).nodeType(NodeType.NEXUS.name())
                     .status(NodeStatus.SUCCESS)
-                    .input(Map.of("url", url, "method", method, "body", body))
+                    .input(input)
                     .successOutput(successOutput)
                     .build();
-
         } catch (HttpStatusCodeException ex) {
             Map<String, Object> failureOutput = new LinkedHashMap<>();
             failureOutput.put("statusCode", ex.getStatusCode().value());
-            failureOutput.put("body",       parseBody(ex.getResponseBodyAsString()));
-            failureOutput.put("error",      ex.getMessage());
-
+            failureOutput.put("body", parseBody(ex.getResponseBodyAsString()));
+            failureOutput.put("error", ex.getMessage());
             return NodeContext.builder()
                     .nodeId(nodeId).nodeType(NodeType.NEXUS.name())
                     .status(NodeStatus.FAILURE)
-                    .input(Map.of("url", url, "method", method, "body", body))
+                    .input(input)
                     .failureOutput(failureOutput)
-                    .errorMessage(ex.getMessage())
+                    .errorMessage(FriendlyErrors.forHttpStatus(ex.getStatusCode().value(), url))
+                    .errorDetail(ex.getMessage())
                     .build();
-
         } catch (Exception ex) {
-            log.error("NEXUS REST node {} failed: {}", nodeId, ex.getMessage());
-            return failureContext(nodeId, Map.of("url", url, "method", method), ex.getMessage());
+            log.warn("NEXUS {} {} failed: {}", method, url, ex.getMessage());
+            return failureContext(nodeId, input, FriendlyErrors.forException(ex, url), ex.getMessage());
         }
     }
 
@@ -209,7 +164,7 @@ public class NexusExecutor implements NodeExecutor {
         String query      = resolver.resolve(rawQuery, nco);
 
         if (query.isBlank()) {
-            return failureContext(nodeId, Map.of("query", rawQuery), "NEXUS JDBC node has no query configured");
+            return failureContext(nodeId, Map.of("query", rawQuery), "This database step has no query yet. Open it and write the SQL.", null);
         }
 
         // Load driver class (Nexus UI stores short name e.g. "postgresql" → map to org.postgresql.Driver)
@@ -220,8 +175,8 @@ public class NexusExecutor implements NodeExecutor {
                 Class.forName(driverClass);
             } catch (ClassNotFoundException ex) {
                 return failureContext(nodeId, Map.of("query", query),
-                        "JDBC driver not found on classpath: " + driverClass
-                        + ". Add the driver dependency to pom.xml.");
+                        "This server can't talk to that kind of database yet (driver " + driverClass + " isn't installed).",
+                        "ClassNotFoundException: " + driverClass);
             }
         }
 
@@ -265,7 +220,7 @@ public class NexusExecutor implements NodeExecutor {
         } catch (SQLException ex) {
             log.error("NEXUS JDBC node {} failed: {}", nodeId, ex.getMessage());
             return failureContext(nodeId, Map.of("query", query, "queryType", queryType),
-                    "SQL error: " + ex.getMessage());
+                    FriendlyErrors.forSql(ex), "SQLState " + ex.getSQLState() + ": " + ex.getMessage());
         }
     }
 
@@ -326,22 +281,26 @@ public class NexusExecutor implements NodeExecutor {
         return base + p;
     }
 
-    @SuppressWarnings("unchecked")
+    /** JSON (object or array) when the body parses, otherwise the raw text. */
     private Object parseBody(String body) {
         if (body == null || body.isBlank()) return null;
-        try { return objectMapper.readValue(body, Map.class); }
-        catch (Exception e) { return body; }
+        try {
+            return objectMapper.readValue(body, Object.class);
+        } catch (Exception e) {
+            return body;
+        }
     }
 
-    private NodeContext failureContext(String nodeId, Map<String, Object> input, String error) {
+    private static NodeContext failureContext(String nodeId, Map<String, Object> input, String message, String detail) {
         Map<String, Object> failureOutput = new LinkedHashMap<>();
-        failureOutput.put("error", error);
+        failureOutput.put("error", detail != null ? detail : message);
         return NodeContext.builder()
                 .nodeId(nodeId).nodeType(NodeType.NEXUS.name())
                 .status(NodeStatus.FAILURE)
                 .input(input != null ? input : Map.of())
                 .failureOutput(failureOutput)
-                .errorMessage(error)
+                .errorMessage(message)
+                .errorDetail(detail != null ? detail : message)
                 .build();
     }
 }

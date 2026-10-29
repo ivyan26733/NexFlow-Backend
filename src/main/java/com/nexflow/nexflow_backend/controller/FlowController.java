@@ -7,6 +7,7 @@ import com.nexflow.nexflow_backend.model.dto.CanvasSaveDto;
 import com.nexflow.nexflow_backend.model.dto.FlowEdgeDto;
 import com.nexflow.nexflow_backend.model.dto.FlowNodeDto;
 import com.nexflow.nexflow_backend.repository.*;
+import com.nexflow.nexflow_backend.service.FlowService;
 import com.nexflow.nexflow_backend.service.GroupService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -35,7 +36,9 @@ public class FlowController {
     private final ExecutionRepository executionRepository;
     private final NexUserRepository nexUserRepository;
     private final FlowSaveLogRepository flowSaveLogRepository;
+    private final FlowScheduleRepository scheduleRepository;
     private final GroupService groupService;
+    private final FlowService flowService;
 
     @GetMapping
     public List<FlowResponse> getAllFlows(@AuthenticationPrincipal NexUser user) {
@@ -295,8 +298,30 @@ public class FlowController {
     }
 
     @GetMapping("/{flowId}/executions")
-    public List<Execution> getExecutions(@PathVariable UUID flowId) {
-        return executionRepository.findByFlowIdOrderByStartedAtDesc(flowId);
+    public ResponseEntity<List<Execution>> getExecutions(@PathVariable UUID flowId,
+                                                         @AuthenticationPrincipal NexUser user) {
+        Flow flow = flowRepository.findById(flowId).orElse(null);
+        if (flow == null) return ResponseEntity.notFound().build();
+        if (user == null || !groupService.hasFlowAccess(flow.getId(), flow.getUserId(), user)) {
+            return ResponseEntity.status(403).build();
+        }
+        return ResponseEntity.ok(executionRepository.findByFlowIdOrderByStartedAtDesc(flowId));
+    }
+
+    /**
+     * Studio "Run": starts the flow (any status, so drafts can be tested) and returns the execution
+     * immediately. The Studio then polls GET /api/executions/{id} until it finishes.
+     */
+    @PostMapping("/{flowId}/run")
+    public ResponseEntity<Execution> runFlow(@PathVariable UUID flowId,
+                                             @RequestBody(required = false) Map<String, Object> payload,
+                                             @AuthenticationPrincipal NexUser user) {
+        Flow flow = flowRepository.findById(flowId).orElse(null);
+        if (flow == null) return ResponseEntity.notFound().build();
+        if (user == null || !groupService.hasFlowAccess(flow.getId(), flow.getUserId(), user)) {
+            return ResponseEntity.status(403).build();
+        }
+        return ResponseEntity.ok(flowService.start(flowId, payload != null ? payload : Map.of(), "STUDIO"));
     }
 
     // ─── EXPORT ──────────────────────────────────────────────────────────────
@@ -428,7 +453,8 @@ public class FlowController {
         if (flow == null) return ResponseEntity.notFound().build();
         if (!isOwnerOrAdmin(flow, user)) return ResponseEntity.status(403).build();
 
-        // Removing the flow also removes its executions, nodes, and edges.
+        // Removing the flow also removes its schedules, executions, nodes, and edges.
+        scheduleRepository.deleteByFlowId(flowId);
         executionRepository.deleteAll(executionRepository.findByFlowIdOrderByStartedAtDesc(flowId));
         nodeRepository.deleteAll(nodeRepository.findByFlowId(flowId));
         edgeRepository.deleteAll(edgeRepository.findByFlowId(flowId));

@@ -29,15 +29,19 @@ abstract class TerminalExecutor implements NodeExecutor {
     @Override
     @SuppressWarnings("unchecked")
     public NodeContext execute(FlowNode node, NexflowContextObject nco) {
-        Map<String, Object> responseTemplate = (Map<String, Object>) node.getConfig().getOrDefault("response", new HashMap<>());
+        Map<String, Object> responseTemplate = (Map<String, Object>) node.configValue("response", new HashMap<>());
         Map<String, Object> resolvedResponse = resolver.resolveMap(responseTemplate, nco);
 
-        return NodeContext.builder()
+        NodeContext.NodeContextBuilder result = NodeContext.builder()
                 .nodeId(node.getId().toString())
                 .nodeType(node.getNodeType().name())
                 .status(terminalStatus())
-                .output(resolvedResponse)
-                .build();
+                .output(resolvedResponse);
+        if (terminalStatus() == NodeStatus.FAILURE) {
+            String message = "The flow reached its failure end step '" + node.displayName() + "'.";
+            result.errorMessage(message).errorDetail(message);
+        }
+        return result.build();
     }
 
     protected abstract NodeStatus terminalStatus();

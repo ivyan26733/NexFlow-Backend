@@ -74,8 +74,6 @@ public class SecurityConfig {
                 // Actuator health only
                 .requestMatchers("/actuator/health").permitAll()
                 .requestMatchers("/actuator/**").hasRole("ADMIN")
-                // WebSocket endpoints
-                .requestMatchers("/ws/**", "/topic/**", "/app/**").permitAll()
                 // OAuth2 redirect endpoints
                 .requestMatchers("/oauth2/**", "/login/oauth2/**").permitAll()
                 // Everything else requires authentication

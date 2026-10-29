@@ -186,10 +186,14 @@ public class ReferenceResolver {
             return resolveNestedPath(nco.getNex() != null ? nco.getNex() : Map.of(), remainder);
         }
 
-        if (parts[0].equals("loop") && parts.length >= 2 && loopContext != null) {
+        if (parts[0].equals("loop") && parts.length >= 2) {
+            // In a LOOP's own condition, index = passes already started. Inside the loop body
+            // (no explicit context) index = the current pass, 0-based.
+            LoopState loop = loopContext != null ? loopContext : nco.getInnermostLoop();
+            if (loop == null) return null;
             return switch (parts[1]) {
-                case "index" -> loopContext.getIndex();
-                case "accumulated" -> loopContext.getAccumulated();
+                case "index" -> loopContext != null ? loop.getIndex() : loop.getIndex() - 1;
+                case "accumulated" -> loop.getAccumulated();
                 default -> null;
             };
         }

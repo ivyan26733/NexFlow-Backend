@@ -31,7 +31,7 @@ public class Execution {
     private ExecutionStatus status = ExecutionStatus.RUNNING;
 
     @Column(name = "triggered_by")
-    private String triggeredBy; // PULSE, MANUAL, SCHEDULE
+    private String triggeredBy; // STUDIO, PULSE, SCHEDULE, SUB_FLOW:<parentExecutionId>
 
     /**
      * Original trigger payload for this execution.
@@ -52,6 +52,11 @@ public class Execution {
     @Column(name = "completed_at")
     private Instant completedAt;
 
+    /** Plain-language reason the run failed. */
     @Column(name = "error_message", columnDefinition = "text")
     private String errorMessage;
+
+    /** Technical detail behind errorMessage, for developers. */
+    @Column(name = "error_detail", columnDefinition = "text")
+    private String errorDetail;
 }

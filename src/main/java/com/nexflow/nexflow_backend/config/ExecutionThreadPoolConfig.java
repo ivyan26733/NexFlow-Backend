@@ -4,50 +4,34 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
-import java.util.concurrent.Executor;
-
+/**
+ * Dedicated thread pools so flow runs never compete with web requests or the JVM common pool.
+ * Sized for a small (2 vCPU) server: flows mostly wait on I/O, so more threads than cores is fine.
+ */
 @Configuration
 public class ExecutionThreadPoolConfig {
 
-    /**
-     * Dedicated thread pool for flow execution.
-     *
-     * This avoids using the JVM's common ForkJoinPool, which can become
-     * saturated under load and cause executions to remain in RUNNING state
-     * without the engine ever starting.
-     */
+    /** Whole flow runs (one thread per running flow). */
     @Bean(name = "flowExecutionExecutor")
-    public Executor flowExecutionExecutor() {
-        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        // This pool runs whole flow executions in the background.
-        executor.setCorePoolSize(20);
-        executor.setMaxPoolSize(50);
-        executor.setQueueCapacity(100);
-        executor.setThreadNamePrefix("flow-exec-");
-        executor.setWaitForTasksToCompleteOnShutdown(true);
-        executor.setAwaitTerminationSeconds(60);
-        executor.initialize();
-        return executor;
+    public ThreadPoolTaskExecutor flowExecutionExecutor() {
+        return pool("flow-exec-", 10, 30, 200);
     }
 
-    /**
-     * Dedicated thread pool for FORK branch execution only.
-     * Ensures branches run in parallel: core size is set so multiple branches
-     * get threads at once (e.g. 3 branches = 3 threads), avoiding cumulative
-     * runtimes when each branch has the same timeout.
-     */
+    /** FORK branches, kept separate so parallel branches never wait behind whole flow runs. */
     @Bean(name = "forkBranchExecutor")
-    public Executor forkBranchExecutor() {
+    public ThreadPoolTaskExecutor forkBranchExecutor() {
+        return pool("fork-branch-", 10, 40, 200);
+    }
+
+    private static ThreadPoolTaskExecutor pool(String prefix, int core, int max, int queue) {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        // FORK branches use their own pool so parallel branches do not block the main flow pool.
-        executor.setCorePoolSize(20);
-        executor.setMaxPoolSize(50);
-        executor.setQueueCapacity(200);
-        executor.setThreadNamePrefix("fork-branch-");
+        executor.setCorePoolSize(core);
+        executor.setMaxPoolSize(max);
+        executor.setQueueCapacity(queue);
+        executor.setThreadNamePrefix(prefix);
         executor.setWaitForTasksToCompleteOnShutdown(true);
-        executor.setAwaitTerminationSeconds(60);
+        executor.setAwaitTerminationSeconds(30);
         executor.initialize();
         return executor;
     }
 }
-

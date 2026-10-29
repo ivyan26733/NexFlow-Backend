@@ -57,3 +57,6 @@ build/
 # Cloudflare tunnel binary
 cloudflared.exe
 cloudflared
+
+# macOS
+.DS_Store

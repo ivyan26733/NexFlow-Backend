@@ -39,14 +39,14 @@ import java.util.UUID;
  * }
  *
  * SYNC behaviour:
- *   - Calls FlowService.triggerFlow() — blocks until child execution completes.
+ *   - Calls FlowService.runAndWait() — blocks until the child execution completes.
  *   - Child's final NCO snapshot is embedded in successOutput so the parent
  *     flow can reference child node outputs:
  *     {{nodes.subFlowNodeId.successOutput.nco.nodes.childNodeId.successOutput.body.field}}
  *   - If child flow ends in FAILURE → this node returns FAILURE → parent routes via failure edge.
  *
  * ASYNC behaviour:
- *   - Calls FlowService.triggerFlowAsync() — returns immediately.
+ *   - Calls FlowService.start() — returns immediately.
  *   - successOutput contains only { "executionId": "...", "status": "TRIGGERED" }.
  *   - Parent flow continues immediately; no child result is available.
  *   - Node always returns SUCCESS so the parent can continue on the success edge.
@@ -79,25 +79,23 @@ public class SubFlowExecutor implements NodeExecutor {
         // ── Validate config ──────────────────────────────────────────────────
         String targetFlowId = (String) config.get("targetFlowId");
         if (targetFlowId == null || targetFlowId.isBlank()) {
-            return failure(nodeId, null, "SUB_FLOW node has no targetFlowId configured");
+            return failure(nodeId, null, "This step doesn't say which flow to run. Open it and pick a flow.");
         }
 
         UUID targetUuid;
         try {
             targetUuid = UUID.fromString(targetFlowId);
         } catch (IllegalArgumentException ex) {
-            return failure(nodeId, null, "SUB_FLOW node has invalid targetFlowId: " + targetFlowId);
+            return failure(nodeId, null, "The flow this step should run isn't valid. Open it and pick the flow again.");
         }
 
         Flow targetFlow = flowRepository.findById(targetUuid).orElse(null);
         if (targetFlow == null) {
-            return failure(nodeId, null, "Target flow not found: " + targetFlowId);
+            return failure(nodeId, null, "The flow this step runs no longer exists. Open it and pick another flow.");
         }
 
-        // Prevent infinite loops — a flow cannot call itself
         if (targetUuid.toString().equals(nco.getMeta().getFlowId())) {
-            return failure(nodeId, null,
-                "Circular reference: flow cannot call itself. Use a different target flow.");
+            return failure(nodeId, null, "A flow can't run itself as a sub-flow. Pick a different flow.");
         }
 
         String mode = ((String) config.getOrDefault("mode", "SYNC")).toUpperCase();
@@ -111,11 +109,11 @@ public class SubFlowExecutor implements NodeExecutor {
             NodeContext startCtx = nco.getNodeOutput("start");
             if (startCtx != null && startCtx.getOutput() != null && startCtx.getOutput().get("body") instanceof Map<?, ?> body) {
                 resolvedPayload = new HashMap<>((Map<String, Object>) body);
-                log.info("[SUB-FLOW] empty payload config — passing parent trigger body to child: {}", resolvedPayload);
+                log.debug("[SUB-FLOW] empty payload config — passing parent trigger body to child: {}", resolvedPayload);
             }
         }
 
-        log.info("[SUB-FLOW] triggering child flowId={}, targetFlowName={}, rawPayload={}, resolvedPayload={} (child receives this as input.trigger.body)",
+        log.debug("[SUB-FLOW] triggering child flowId={}, targetFlowName={}, rawPayload={}, resolvedPayload={} (child receives this as input.trigger.body)",
                 targetFlowId, targetFlow.getName(), rawPayload, resolvedPayload);
 
         String triggeredBy = "SUB_FLOW:" + nco.getMeta().getExecutionId();
@@ -128,12 +126,10 @@ public class SubFlowExecutor implements NodeExecutor {
 
         // ── ASYNC — fire and forget ──────────────────────────────────────────
         if ("ASYNC".equals(mode)) {
-            // Create the execution record synchronously so we have an ID to return
-            Execution stub = new Execution();  // FlowService.triggerFlowAsync creates its own, but we
-            // just fire it — the executionId is not pre-knowable in async, so we return TRIGGERED.
-            flowService.triggerFlowAsync(targetUuid, resolvedPayload, triggeredBy);
+            Execution started = flowService.start(targetUuid, resolvedPayload, triggeredBy);
 
             Map<String, Object> successOutput = new LinkedHashMap<>();
+            successOutput.put("executionId",      started.getId().toString());
             successOutput.put("status",           "TRIGGERED");
             successOutput.put("mode",             "ASYNC");
             successOutput.put("targetFlowId",     targetFlowId);
@@ -150,7 +146,7 @@ public class SubFlowExecutor implements NodeExecutor {
 
         // ── SYNC — block until child completes ───────────────────────────────
         try {
-            Execution childExecution = flowService.triggerFlowSync(targetUuid, resolvedPayload, triggeredBy);
+            Execution childExecution = flowService.runAndWait(targetUuid, resolvedPayload, triggeredBy);
             boolean   childSucceeded = "SUCCESS".equals(childExecution.getStatus().name());
 
             Map<String, Object> childSnapshot = childExecution.getNcoSnapshot();
@@ -175,15 +171,17 @@ public class SubFlowExecutor implements NodeExecutor {
             if (childSucceeded) {
                 builder.successOutput(output);
             } else {
+                String reason = childExecution.getErrorMessage() != null ? " Reason: " + childExecution.getErrorMessage() : "";
                 builder.failureOutput(output)
-                       .errorMessage("Child flow ended with status: " + childExecution.getStatus().name());
+                       .errorMessage("The flow '" + targetFlow.getName() + "' run by this step failed." + reason)
+                       .errorDetail("Child execution " + childExecution.getId() + " ended with " + childExecution.getStatus());
             }
 
             return builder.build();
 
         } catch (Exception ex) {
             log.error("SUB_FLOW node {} — child flow {} failed: {}", nodeId, targetFlowId, ex.getMessage());
-            return failure(nodeId, inputSnapshot, "Child flow execution threw: " + ex.getMessage());
+            return failure(nodeId, inputSnapshot, "The flow '" + targetFlow.getName() + "' couldn't be started: " + ex.getMessage());
         }
     }
 

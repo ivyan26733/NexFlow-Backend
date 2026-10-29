@@ -110,11 +110,7 @@ public class DecisionExecutor implements NodeExecutor {
             return decisionResult(nodeId, false, "Decision node in code mode has no code written.", "code");
         }
 
-        // Same data shape as ScriptExecutor: { nex, input } for both new and legacy syntax
-        Map<String, Object> scriptData = new LinkedHashMap<>();
-        scriptData.put("nex",   nco.getNex() != null ? nco.getNex() : new java.util.LinkedHashMap<>());
-        scriptData.put("input", buildInput(nco));
-        ScriptRunner.ScriptResult result = scriptRunner.run(language, code, scriptData);
+        ScriptRunner.ScriptResult result = scriptRunner.run(language, code, nco.toScriptData());
 
         if (!result.success()) {
             return decisionResult(nodeId, false, result.error(), "code");
@@ -131,17 +127,6 @@ public class DecisionExecutor implements NodeExecutor {
         if (value instanceof Number)  return ((Number) value).doubleValue() != 0;
         if (value instanceof String)  return !((String) value).isBlank() && !"false".equalsIgnoreCase((String) value);
         return true; // non-null objects are truthy
-    }
-
-    private Map<String, Object> buildInput(NexflowContextObject nco) {
-        Map<String, Object> input = new LinkedHashMap<>();
-        input.put("variables", nco.getVariables());
-        input.put("nodes", nco.getNodesForScriptInput());
-        NodeContext startCtx = nco.getNodeOutput("start");
-        Object triggerOutput = startCtx != null ? startCtx.getOutput() : null;
-        input.put("trigger", triggerOutput);
-        input.put("nex", nco.getNex() != null ? nco.getNex() : new java.util.LinkedHashMap<>());
-        return input;
     }
 
     private NodeContext decisionResult(String nodeId, boolean decision, String error, String mode) {

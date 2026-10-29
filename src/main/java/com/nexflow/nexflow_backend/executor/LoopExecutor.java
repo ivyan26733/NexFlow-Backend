@@ -1,30 +1,38 @@
 package com.nexflow.nexflow_backend.executor;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nexflow.nexflow_backend.model.domain.FlowNode;
 import com.nexflow.nexflow_backend.model.domain.NodeType;
 import com.nexflow.nexflow_backend.model.nco.LoopState;
 import com.nexflow.nexflow_backend.model.nco.NexflowContextObject;
 import com.nexflow.nexflow_backend.model.nco.NodeContext;
 import com.nexflow.nexflow_backend.model.nco.NodeStatus;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nexflow.nexflow_backend.repository.NodeExecutor;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 /**
- * Executes LOOP nodes: evaluates condition (with {{loop.index}} / {{loop.accumulated}}),
- * returns CONTINUE to re-enter loop body or SUCCESS to exit.
+ * LOOP: "while condition is true, run the body again".
+ *
+ * Each time the engine reaches the loop it evaluates the condition, where {{loop.index}} is the number
+ * of passes already started (0 the first time). True → CONTINUE (the engine re-runs the body through the
+ * Repeat connection, and the body leads back here). False → SUCCESS (the engine follows the Exit connection).
+ *
+ * Config: { "condition": "{{loop.index}} < 3", "maxIterations": 100 }
+ * Output on exit: { iterationCount, index, accumulated } — accumulated holds the output of the
+ * last body step of every pass (up to 100). Inside the body, {{loop.index}} is the current pass (0-based).
  */
 @Component
 @RequiredArgsConstructor
 public class LoopExecutor implements NodeExecutor {
+
+    private static final int DEFAULT_MAX = 100;
+    private static final int HARD_MAX = 1000;
+    private static final String[] OPERATORS = {"==", "!=", "<=", ">=", "<", ">"};
 
     private final ReferenceResolver resolver;
     private final ObjectMapper objectMapper;
@@ -37,201 +45,107 @@ public class LoopExecutor implements NodeExecutor {
     @Override
     public NodeContext execute(FlowNode node, NexflowContextObject nco) {
         String nodeId = node.getId().toString();
-        String label = node.getLabel() != null ? node.getLabel() : nodeId;
+        String condition = String.valueOf(node.configValue("condition", "false"));
+        int max = node.configValue("maxIterations", null) instanceof Number n
+                ? Math.max(1, Math.min(HARD_MAX, n.intValue()))
+                : DEFAULT_MAX;
 
-        // Fail fast if no CONTINUE edge (engine populates loopNodeHasContinueEdge at start)
-        Boolean hasContinue = nco.getMeta().getLoopNodeHasContinueEdge() != null
-            ? nco.getMeta().getLoopNodeHasContinueEdge().get(nodeId)
-            : null;
-        if (!Boolean.TRUE.equals(hasContinue)) {
-            nco.getMeta().setErrorMessage(
-                "LOOP node '" + label + "' has no CONTINUE edge. Draw an edge from the CONTINUE handle back to the loop body."
-            );
-            return failure(nodeId, nco.getMeta().getErrorMessage());
-        }
+        LoopState state = nco.getLoopStates().computeIfAbsent(nodeId, LoopState::new);
+        if (state.getIndex() > 0) collectPreviousPass(state, nodeId, nco);
 
-        Map<String, Object> config = node.getConfig() != null ? node.getConfig() : Map.of();
-        String condition = (String) config.getOrDefault("condition", "false");
-        int maxIterations = Math.min(1000, Math.max(1, config.get("maxIterations") instanceof Number n
-            ? n.intValue() : 100));
-
-        Map<String, LoopState> loopStates = nco.getMeta().getLoopStates();
-        if (loopStates == null) {
-            loopStates = new LinkedHashMap<>();
-            nco.getMeta().setLoopStates(loopStates);
-        }
-        LoopState loopState = loopStates.get(nodeId);
-        if (loopState == null) {
-            loopState = new LoopState(nodeId);
-            loopState.setMaxIterations(maxIterations);
-            loopStates.put(nodeId, loopState);
-        } else {
-            loopState.setMaxIterations(maxIterations);
-        }
-
-        if (loopState.getIndex() >= loopState.getMaxIterations()) {
-            nco.getMeta().setErrorMessage(
-                "Loop exceeded max iterations (" + maxIterations + ") at node '" + label + "'. Increase max or fix exit condition."
-            );
-            return failure(nodeId, nco.getMeta().getErrorMessage());
-        }
-
-        // Collect previous iteration output: last node in execution order before this LOOP run
-        List<String> order = nco.getNodeExecutionOrder();
-        if (order != null && !order.isEmpty()) {
-            String lastNodeId = order.get(order.size() - 1);
-            if (!lastNodeId.equals(nodeId)) {
-                NodeContext lastCtx = nco.getNodeOutput(lastNodeId);
-                if (lastCtx != null) {
-                    Object previousOutput = lastCtx.getSuccessOutput() != null ? lastCtx.getSuccessOutput() : lastCtx.getOutput();
-                    if (loopState.getAccumulated() == null) loopState.setAccumulated(new ArrayList<>());
-                    // Cap accumulated to last 100 entries to prevent OOM on high-iteration loops.
-                    // Flows running 1000+ iterations can generate hundreds of MB if each iteration
-                    // produces a large payload (e.g. HTTP response body). Callers that need all
-                    // outputs should write them to a DB node inside the loop body instead.
-                    if (loopState.getAccumulated().size() < 100) {
-                        Object deepCopy = deepCopy(previousOutput);
-                        loopState.getAccumulated().add(deepCopy != null ? deepCopy : previousOutput);
-                    }
-                }
-            }
-        }
-
-        String resolvedCondition = resolver.resolve(condition, nco, loopState);
-        boolean conditionTrue;
+        boolean repeat;
         try {
-            conditionTrue = evaluateCondition(resolvedCondition);
-        } catch (Exception e) {
-            nco.getMeta().setErrorMessage(
-                "Loop condition failed: " + e.getMessage() + ". Condition was: '" + condition + "'"
-            );
-            return failure(nodeId, nco.getMeta().getErrorMessage());
+            repeat = evaluate(resolver.resolve(condition, nco, state));
+        } catch (RuntimeException e) {
+            nco.getLoopStates().remove(nodeId);
+            return failure(nodeId, "The loop condition couldn't be checked: \"" + condition + "\".", e.getMessage());
         }
 
-        if (conditionTrue) {
-            loopState.setIndex(loopState.getIndex() + 1);
+        if (repeat && state.getIndex() >= max) {
+            nco.getLoopStates().remove(nodeId);
+            return failure(nodeId, "The loop '" + node.displayName() + "' repeated " + max
+                    + " times (its limit) and its condition was still true. Check the condition, or raise Max iterations.", null);
+        }
+
+        if (repeat) {
+            Map<String, Object> pass = Map.of("index", state.getIndex(), "iteration", state.getIndex() + 1);
+            state.setIndex(state.getIndex() + 1);
             return NodeContext.builder()
+                    .nodeId(nodeId)
+                    .nodeType(NodeType.LOOP.name())
+                    .status(NodeStatus.CONTINUE)
+                    .output(pass)
+                    .build();
+        }
+
+        nco.getLoopStates().remove(nodeId); // so the loop starts fresh if it is entered again
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("iterationCount", state.getIndex());
+        result.put("index", state.getIndex());
+        result.put("accumulated", state.getAccumulated());
+        String saveAs = node.saveOutputAsKey();
+        if (saveAs != null) nco.getNex().put(saveAs, result);
+        return NodeContext.builder()
                 .nodeId(nodeId)
                 .nodeType(NodeType.LOOP.name())
-                .status(NodeStatus.CONTINUE)
-                .output(Map.of("index", loopState.getIndex(), "continuing", true))
+                .status(NodeStatus.SUCCESS)
+                .successOutput(result)
+                .output(result)
                 .build();
-        }
-
-        Map<String, Object> successOutput = new LinkedHashMap<>();
-        successOutput.put("index", loopState.getIndex());
-        successOutput.put("accumulated", loopState.getAccumulated() != null ? loopState.getAccumulated() : List.of());
-        successOutput.put("iterationCount", loopState.getIndex() + 1);
-
-        // Additionally store in nex if saveOutputAs is set for {{nex.myLoop.accumulated}} etc.
-        String saveAs = extractSaveOutputAs(node);
-        if (saveAs != null && !saveAs.isBlank()) {
-            String key = saveAs.trim();
-            if (key.matches("[a-zA-Z_][a-zA-Z0-9_]*") && nco.getNex() != null) {
-                nco.getNex().put(key, new LinkedHashMap<>(successOutput));
-            }
-        }
-
-        return NodeContext.builder()
-            .nodeId(nodeId)
-            .nodeType(NodeType.LOOP.name())
-            .status(NodeStatus.SUCCESS)
-            .successOutput(successOutput)
-            .output(successOutput)
-            .build();
     }
 
-    private static String extractSaveOutputAs(FlowNode node) {
-        try {
-            Map<String, Object> config = node.getConfig();
-            if (config == null) return null;
-            Object val = config.get("saveOutputAs");
-            return val != null ? val.toString() : null;
-        } catch (Exception e) {
-            return null;
-        }
+    /** We are coming back from the body: keep the output of its last step. */
+    private void collectPreviousPass(LoopState state, String loopId, NexflowContextObject nco) {
+        List<String> order = nco.getNodeExecutionOrder();
+        if (order.isEmpty() || order.get(order.size() - 1).equals(loopId)) return;
+        NodeContext last = nco.getNodeOutput(order.get(order.size() - 1));
+        if (last == null) return;
+        Object value = last.getSuccessOutput() != null ? last.getSuccessOutput() : last.getOutput();
+        // Deep copy so later passes can't mutate what was already collected.
+        state.accumulate(value != null ? objectMapper.convertValue(value, Object.class) : null);
     }
 
-    /**
-     * Parse condition string: "left op right" with op in == != < > <= >=.
-     * Numeric comparison if both sides parse as Double; else "true"/"false" as boolean; else string.
-     */
-    private boolean evaluateCondition(String condition) {
-        if (condition == null) return false;
-        condition = condition.trim();
-        String[] ops = new String[] { "==", "!=", "<=", ">=", "<", ">" };
-        for (String op : ops) {
-            int i = condition.indexOf(op);
-            if (i >= 0) {
-                String left = condition.substring(0, i).trim();
-                String right = condition.substring(i + op.length()).trim();
-                return compare(left, right, op);
-            }
+    /** "left op right" with numeric comparison when both sides are numbers, otherwise text; or a bare true/false. */
+    static boolean evaluate(String condition) {
+        String c = condition == null ? "" : condition.trim();
+        for (String op : OPERATORS) {
+            int i = c.indexOf(op);
+            if (i >= 0) return compare(c.substring(0, i).trim(), c.substring(i + op.length()).trim(), op);
         }
-        return Boolean.parseBoolean(condition);
+        return Boolean.parseBoolean(c);
     }
 
-    private boolean compare(String leftStr, String rightStr, String op) {
-        Double lNum = parseDouble(leftStr);
-        Double rNum = parseDouble(rightStr);
-        if (lNum != null && rNum != null) {
-            return switch (op) {
-                case "==" -> lNum.equals(rNum);
-                case "!=" -> !lNum.equals(rNum);
-                case "<"  -> lNum < rNum;
-                case ">"  -> lNum > rNum;
-                case "<=" -> lNum <= rNum;
-                case ">=" -> lNum >= rNum;
-                default  -> false;
-            };
-        }
-        if ("true".equalsIgnoreCase(leftStr) || "false".equalsIgnoreCase(leftStr)) {
-            boolean l = Boolean.parseBoolean(leftStr);
-            boolean r = Boolean.parseBoolean(rightStr);
-            return switch (op) {
-                case "==" -> l == r;
-                case "!=" -> l != r;
-                default   -> false;
-            };
-        }
-        int cmp = Objects.equals(leftStr, rightStr) ? 0 : leftStr.compareTo(rightStr);
+    private static boolean compare(String left, String right, String op) {
+        Double l = number(left);
+        Double r = number(right);
+        int cmp = l != null && r != null ? Double.compare(l, r) : left.compareTo(right);
         return switch (op) {
             case "==" -> cmp == 0;
             case "!=" -> cmp != 0;
-            case "<"  -> cmp < 0;
-            case ">"  -> cmp > 0;
+            case "<" -> cmp < 0;
+            case ">" -> cmp > 0;
             case "<=" -> cmp <= 0;
             case ">=" -> cmp >= 0;
-            default  -> false;
+            default -> false;
         };
     }
 
-    private Double parseDouble(String s) {
-        if (s == null || s.isBlank()) return null;
+    private static Double number(String s) {
         try {
-            return Double.parseDouble(s.trim());
+            return s.isBlank() ? null : Double.parseDouble(s);
         } catch (NumberFormatException e) {
             return null;
         }
     }
 
-    /** Deep copy via ObjectMapper so accumulated list does not hold references that can be mutated later. */
-    private Object deepCopy(Object value) {
-        if (value == null) return null;
-        try {
-            return objectMapper.readValue(objectMapper.writeValueAsString(value), Object.class);
-        } catch (JsonProcessingException e) {
-            return null;
-        }
-    }
-
-    private NodeContext failure(String nodeId, String error) {
+    private static NodeContext failure(String nodeId, String message, String detail) {
         return NodeContext.builder()
-            .nodeId(nodeId)
-            .nodeType(NodeType.LOOP.name())
-            .status(NodeStatus.FAILURE)
-            .failureOutput(Map.of("error", error != null ? error : "Loop failed"))
-            .errorMessage(error)
-            .build();
+                .nodeId(nodeId)
+                .nodeType(NodeType.LOOP.name())
+                .status(NodeStatus.FAILURE)
+                .failureOutput(Map.of("error", message))
+                .errorMessage(message)
+                .errorDetail(detail != null ? detail : message)
+                .build();
     }
 }

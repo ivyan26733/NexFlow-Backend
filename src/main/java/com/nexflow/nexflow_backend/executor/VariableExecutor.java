@@ -43,23 +43,13 @@ public class VariableExecutor implements NodeExecutor {
         Map<String, Object> output = new HashMap<>();
         resolved.forEach((key, value) -> output.put(key, normalizeVariableValue(value)));
 
-        // Always spread every variable directly into nex for flat access:
-        // {{nex.userId}}, {{nex.discount}}, etc.  putIfAbsent so trigger body fields set earlier are not clobbered.
-        if (nco.getNex() != null) {
-            output.forEach((k, v) -> nco.getNex().put(k, v));
-        }
+        // Every variable is also available flat: {{nex.userId}}, {{nex.discount}}…
+        nco.getNex().putAll(output);
 
-        // Optional named group: save entire output map (or scalar) under a single key
-        String saveAs = extractSaveOutputAs(node);
-        if (saveAs != null && !saveAs.isBlank()) {
-            String key = saveAs.trim();
-            if (key.matches("[a-zA-Z_][a-zA-Z0-9_]*") && nco.getNex() != null) {
-                if (output.size() == 1) {
-                    nco.getNex().put(key, output.values().iterator().next());
-                } else {
-                    nco.getNex().put(key, output);
-                }
-            }
+        // Optional named group: the whole map (or the single value) under one key
+        String saveAs = node.saveOutputAsKey();
+        if (saveAs != null) {
+            nco.getNex().put(saveAs, output.size() == 1 ? output.values().iterator().next() : output);
         }
 
         return NodeContext.builder()
@@ -95,16 +85,5 @@ public class VariableExecutor implements NodeExecutor {
             }
         }
         return value;
-    }
-
-    private static String extractSaveOutputAs(com.nexflow.nexflow_backend.model.domain.FlowNode node) {
-        try {
-            Map<String, Object> config = node.getConfig();
-            if (config == null) return null;
-            Object val = config.get("saveOutputAs");
-            return val != null ? val.toString() : null;
-        } catch (Exception e) {
-            return null;
-        }
     }
 }

@@ -59,7 +59,7 @@ public class AiNodeExecutor implements NodeExecutor {
     @Override
     public NodeContext execute(FlowNode node, NexflowContextObject nco) {
         Map<String, Object> cfg = node.getConfig();
-        if (cfg == null) return failure(node.getId().toString(), Map.of(), "AI node has no config.");
+        if (cfg == null) return failure(node.getId().toString(), Map.of(), "This AI step isn't set up yet. Open it and choose a provider and prompt.");
 
         String providerStr = (String) cfg.getOrDefault("provider", "ANTHROPIC");
         String model = (String) cfg.get("model");
@@ -69,14 +69,14 @@ public class AiNodeExecutor implements NodeExecutor {
         double temperature = cfg.containsKey("temperature") ? ((Number) cfg.get("temperature")).doubleValue() : 0.0;
 
         if (prompt == null || prompt.isBlank()) {
-            return failure(node.getId().toString(), Map.of(), "AI node has no prompt configured.");
+            return failure(node.getId().toString(), Map.of(), "This AI step has no prompt yet. Open it and write what the AI should do.");
         }
 
         LlmProvider provider;
         try {
             provider = LlmProvider.valueOf(providerStr.toUpperCase());
         } catch (IllegalArgumentException e) {
-            return failure(node.getId().toString(), Map.of(), "Unknown LLM provider: '" + providerStr + "'.");
+            return failure(node.getId().toString(), Map.of(), "The AI provider '" + providerStr + "' isn't supported. Pick another provider on this step.");
         }
 
         // Look up the flow owner's config first; fall back to any global config for backward compat
@@ -86,7 +86,7 @@ public class AiNodeExecutor implements NodeExecutor {
                 : providerConfigRepo.findByProvider(provider);
         if (providerCfgOpt.isEmpty() || !providerCfgOpt.get().isEnabled()) {
             return failure(node.getId().toString(), Map.of(),
-                "No API key configured for provider '" + provider.getDisplayName() + "'. Go to Settings → AI Providers and add your key.");
+                "There's no API key for " + provider.getDisplayName() + ". Add one in Settings → AI Providers.");
         }
         LlmProviderConfig providerCfg = providerCfgOpt.get();
 
@@ -116,14 +116,14 @@ public class AiNodeExecutor implements NodeExecutor {
         }
         if (inputsJson.length() > MAX_INPUT_CHARS) {
             return failure(node.getId().toString(), Map.of(),
-                "AI node inputs exceed maximum size (" + MAX_INPUT_CHARS + " chars). Reduce the data passed via input bindings.");
+                "Too much data is being sent to the AI (over " + MAX_INPUT_CHARS + " characters). Pass less data through the input bindings.");
         }
 
         // Resolve ALL {{...}} refs in prompt: binding names first, then direct paths (nex.*, nodes.*, etc.)
         String resolvedPrompt = resolveAllRefsInPrompt(prompt, inputs, nco);
         if (resolvedPrompt.length() > MAX_INPUT_CHARS) {
             return failure(node.getId().toString(), Map.of(),
-                "Resolved prompt is too large (" + resolvedPrompt.length() + " chars). Reduce referenced data.");
+                "The prompt is too long after filling in its values (" + resolvedPrompt.length() + " characters). Reference less data.");
         }
         String systemPrompt = buildSystemPrompt(outputSchema);
         String userPrompt = buildUserPrompt(resolvedPrompt, inputsJson, inputs.isEmpty());

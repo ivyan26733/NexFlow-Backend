@@ -3,19 +3,24 @@ package com.nexflow.nexflow_backend.model.nco;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.nexflow.nexflow_backend.NcoMeta;
-import com.nexflow.nexflow_backend.model.domain.FlowNode;
+import com.nexflow.nexflow_backend.engine.FlowGraph;
 import lombok.Builder;
 import lombok.Data;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
+/**
+ * Everything one flow run knows: per-node results, flow variables and the {@code nex} container.
+ * Serialised into Execution.ncoSnapshot when the run ends (fields marked @JsonIgnore are runtime-only).
+ */
 @Data
 @Builder
 @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -26,32 +31,40 @@ public class NexflowContextObject {
     @Builder.Default
     private Map<String, Object> variables = new HashMap<>();
 
-    /** Keyed by node UUID only — serialized to DB/API so Transactions page shows each node once. */
+    /** Keyed by node UUID only — serialised to DB/API so the transaction page shows each node once. */
     @Builder.Default
     private Map<String, NodeContext> nodes = new LinkedHashMap<>();
 
-    /** Label-keyed aliases (calculateDiscount, start, etc.) for resolution during execution only. Not persisted. */
+    /** Label-keyed aliases (calculateDiscount, start…) used for {{nodes.label.x}} resolution. Not persisted. */
     @JsonIgnore
     @Builder.Default
     private Map<String, NodeContext> nodeAliases = new LinkedHashMap<>();
 
-    /** Universal flat container for named outputs: nodes with saveOutputAs store output here; resolve via {{nex.NAME.field}}. Keys are case-sensitive. */
+    /** Universal flat container for named outputs; resolve via {{nex.NAME.field}}. Keys are case-sensitive. */
     @Builder.Default
     private Map<String, Object> nex = new LinkedHashMap<>();
 
-    // Explicit execution order — jsonb reorders object keys, so we keep a list (arrays stay ordered)
+    /** Execution order (a node appears once per run, so loop bodies appear several times). */
     @Builder.Default
     private List<String> nodeExecutionOrder = new ArrayList<>();
 
+    /** The flow being executed. Read-only; shared by branch contexts. */
+    @JsonIgnore
+    private FlowGraph graph;
+
+    /** Active LOOP nodes, innermost last. Each context (main / branch) has its own. */
+    @JsonIgnore
+    @Builder.Default
+    private Map<String, LoopState> loopStates = new LinkedHashMap<>();
+
     /**
-     * All flow nodes for the current execution.
-     * Set once at execution start and treated as read-only.
-     * Used by FORK/JOIN branch resolution to avoid DB access on branch threads.
+     * nex keys that automatic label keys must not overwrite: explicit "Save output as" names
+     * and the trigger payload fields.
      */
     @JsonIgnore
-    private List<FlowNode> flowNodes;
+    @Builder.Default
+    private Set<String> protectedNexKeys = new HashSet<>();
 
-//    Factory Method
     public static NexflowContextObject create(String flowId, String executionId, UUID userId) {
         return NexflowContextObject.builder()
                 .meta(NcoMeta.builder()
@@ -64,33 +77,36 @@ public class NexflowContextObject {
                 .build();
     }
 
-    /** Store by UUID — only this map is serialized to DB/API. */
+    /**
+     * Isolated context for one FORK branch: shares meta and graph, starts from copies of the parent's
+     * variables, node results and nex, and has its own loop state so branch threads never share mutable maps.
+     */
+    public static NexflowContextObject forBranch(NexflowContextObject parent) {
+        return NexflowContextObject.builder()
+                .meta(parent.getMeta())
+                .variables(new LinkedHashMap<>(parent.getVariables()))
+                .nodes(new LinkedHashMap<>(parent.getNodes()))
+                .nodeAliases(new LinkedHashMap<>(parent.getNodeAliases()))
+                .nex(new LinkedHashMap<>(parent.getNex()))
+                .graph(parent.getGraph())
+                .protectedNexKeys(new HashSet<>(parent.getProtectedNexKeys()))
+                .build();
+    }
+
+    /** Store by UUID — only this map is serialised. */
     public void setNodeOutput(String nodeId, NodeContext context) {
         nodes.put(nodeId, context);
     }
 
-    /** Store by label alias — in-memory only, not persisted. Used for {{nodes.calculateDiscount.x}} resolution. */
+    /** Store by label alias — in-memory only. */
     public void setNodeAlias(String aliasKey, NodeContext context) {
         nodeAliases.put(aliasKey, context);
     }
 
-    /** Resolve by UUID first, then by label alias. Used by ReferenceResolver and script input. */
+    /** Resolve by UUID first, then by label alias. */
     public NodeContext getNodeOutput(String key) {
         NodeContext byId = nodes.get(key);
-        if (byId != null) return byId;
-        return nodeAliases.get(key);
-    }
-
-    /**
-     * Returns all flow nodes for this execution.
-     * Never returns null — falls back to an empty list when not populated.
-     */
-    public List<FlowNode> getFlowNodes() {
-        return flowNodes != null ? flowNodes : Collections.emptyList();
-    }
-
-    public void setFlowNodes(List<FlowNode> flowNodes) {
-        this.flowNodes = flowNodes;
+        return byId != null ? byId : nodeAliases.get(key);
     }
 
     public void setVariable(String key, Object value) {
@@ -101,34 +117,36 @@ public class NexflowContextObject {
         return variables.get(key);
     }
 
-    /** Merged view of nodes + nodeAliases for script input so input.nodes.calculateDiscount works. Not persisted. */
+    /** The innermost loop currently repeating, or null. Backs {{loop.index}} inside loop bodies. */
     @JsonIgnore
-    public Map<String, NodeContext> getNodesForScriptInput() {
-        Map<String, NodeContext> merged = new LinkedHashMap<>();
-        if (nodes != null) merged.putAll(nodes);
-        if (nodeAliases != null) merged.putAll(nodeAliases);
-        return merged;
+    public LoopState getInnermostLoop() {
+        LoopState last = null;
+        for (LoopState s : loopStates.values()) last = s;
+        return last;
     }
 
     /**
-     * Factory method for creating an isolated branch context that shares
-     * meta + variables with the parent, but has its own node maps and nex.
-     * Flow nodes are carried over so branch threads can resolve nodes by ID.
+     * Data handed to SCRIPT and DECISION(code) nodes:
+     * {@code { nex, input: { variables, nodes, trigger, nex, loop } }}.
+     * {@code nex.x} is the preferred syntax; {@code input.*} is kept for older scripts.
      */
-    public static NexflowContextObject forBranch(
-            NexflowContextObject parent,
-            Map<String, Object> branchNex,
-            String branchName
-    ) {
-        NexflowContextObject ctx = NexflowContextObject.builder()
-                .meta(parent.getMeta())
-                .variables(new LinkedHashMap<>(parent.getVariables()))
-                .nodes(new LinkedHashMap<>())
-                .nodeAliases(new LinkedHashMap<>())
-                .nex(branchNex != null ? branchNex : new LinkedHashMap<>())
-                .nodeExecutionOrder(new ArrayList<>())
-                .build();
-        ctx.setFlowNodes(parent.getFlowNodes());
-        return ctx;
+    @JsonIgnore
+    public Map<String, Object> toScriptData() {
+        Map<String, Object> allNodes = new LinkedHashMap<>(nodes);
+        allNodes.putAll(nodeAliases);
+        NodeContext start = getNodeOutput("start");
+
+        Map<String, Object> input = new LinkedHashMap<>();
+        input.put("variables", variables);
+        input.put("nodes", allNodes);
+        input.put("trigger", start != null ? start.getOutput() : null);
+        input.put("nex", nex);
+        LoopState loop = getInnermostLoop();
+        if (loop != null) input.put("loop", Map.of("index", loop.getIndex()));
+
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("nex", nex);
+        data.put("input", input);
+        return data;
     }
 }

@@ -16,7 +16,7 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 
-/** Per-node execution record for branch nodes so transaction detail can show input/output. */
+/** One run of a node inside a FORK branch, so the transaction view can show its input, output and error. */
 @Entity
 @Table(name = "node_executions", indexes = {
     @Index(name = "idx_node_exec_execution_id", columnList = "execution_id"),
@@ -61,6 +61,9 @@ public class NodeExecution {
     @Column(name = "error_message", columnDefinition = "text")
     private String errorMessage;
 
+    @Column(name = "error_detail", columnDefinition = "text")
+    private String errorDetail;
+
     @Column(name = "started_at", nullable = false)
     private Instant startedAt = Instant.now();
 
@@ -89,6 +92,8 @@ public class NodeExecution {
     public void setDurationMs(Long durationMs) { this.durationMs = durationMs; }
     public String getErrorMessage() { return errorMessage; }
     public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
+    public String getErrorDetail() { return errorDetail; }
+    public void setErrorDetail(String errorDetail) { this.errorDetail = errorDetail; }
     public Instant getStartedAt() { return startedAt; }
     public void setStartedAt(Instant startedAt) { this.startedAt = startedAt; }
     public Instant getFinishedAt() { return finishedAt; }

@@ -35,11 +35,6 @@ source "$ENV_FILE"
 set +a
 set -H
 
-# RABBITMQ_PORT must not be in the environment — Spring Boot's relaxed binding
-# maps it to rabbitmq.port and overrides the STOMP relay port (61613) with 5672.
-# RABBITMQ_AMQP_PORT is the correct variable for the AMQP port.
-unset RABBITMQ_PORT
-
 # ── Check JAR exists ─────────────────────────────────────────────────────────
 if [ ! -f "$JAR_FILE" ]; then
   echo "ERROR: app.jar not found at $JAR_FILE"

@@ -251,8 +251,9 @@ public class ExecutionController {
     // GET /api/executions/{id}/nex — convenience: only the nex map from the transaction snapshot
     @GetMapping("/{id}/nex")
     @SuppressWarnings("unchecked")
-    public ResponseEntity<Map<String, Object>> getNex(@PathVariable UUID id) {
+    public ResponseEntity<Map<String, Object>> getNex(@PathVariable UUID id, @AuthenticationPrincipal NexUser user) {
         return executionRepository.findById(id)
+                .filter(e -> canAccessExecution(e, user))
                 .map(exec -> {
                     Map<String, Object> nco = exec.getNcoSnapshot();
                     Object nex = nco != null ? nco.get("nex") : null;
@@ -274,8 +275,12 @@ public class ExecutionController {
     @GetMapping("/recent")
     public List<TransactionDigest> getRecent(
             @RequestParam UUID flowId,
-            @RequestParam(defaultValue = "1") int hours) {
-
+            @RequestParam(defaultValue = "1") int hours,
+            @AuthenticationPrincipal NexUser user) {
+        Flow flow = flowRepository.findById(flowId).orElse(null);
+        if (user == null || flow == null || !groupService.hasFlowAccess(flow.getId(), flow.getUserId(), user)) {
+            return List.of();
+        }
         Instant since = Instant.now().minusSeconds((long) hours * 3600);
         List<Execution> executions = executionRepository
                 .findByFlowIdAndStartedAtAfterOrderByStartedAtDesc(flowId, since)
@@ -306,21 +311,6 @@ public class ExecutionController {
                     nodes
             );
         }).toList();
-    }
-
-    /**
-     * POST /api/executions/{executionId}/start
-     *
-     * Called by the frontend AFTER it has confirmed its STOMP subscription
-     * to /queue/execution.{executionId}.
-     *
-     * Returns 202 Accepted immediately. Execution runs in background.
-     */
-    @PostMapping("/{executionId}/start")
-    public ResponseEntity<Void> startExecution(@PathVariable UUID executionId) {
-        log.info("[ExecutionController] start requested for executionId={}", executionId);
-        flowService.startExecution(executionId);
-        return ResponseEntity.accepted().build();
     }
 
     @PostMapping("/discard-running")
@@ -401,6 +391,8 @@ public class ExecutionController {
                 e.getStartedAt() != null ? e.getStartedAt().toString() : null,
                 e.getCompletedAt() != null ? e.getCompletedAt().toString() : null,
                 durationMs,
+                e.getErrorMessage(),
+                e.getErrorDetail(),
                 e.getNcoSnapshot(),  // full NCO — contains all node inputs/outputs
                 branches != null ? branches : List.of(),
                 nodeExecutions != null ? nodeExecutions : List.of()
@@ -448,6 +440,8 @@ public class ExecutionController {
             String                startedAt,
             String                completedAt,
             long                  durationMs,
+            String                errorMessage,  // plain-language reason the run failed
+            String                errorDetail,   // technical detail for developers
             Map<String, Object>   ncoSnapshot,   // raw NCO for full node I/O inspection
             List<BranchExecution> branches,      // per-fork branch execution records for transaction UI
             List<NodeExecution>   nodeExecutions // branch node runs with inputNex/outputNex for request/response
