@@ -2,6 +2,8 @@ package com.nexflow.nexflow_backend.controller;
 
 import com.nexflow.nexflow_backend.model.domain.NexUser;
 import com.nexflow.nexflow_backend.service.AssistantService;
+import com.nexflow.nexflow_backend.service.AssistantService.AssistantReply;
+import com.nexflow.nexflow_backend.service.AssistantService.ChatContext;
 import com.nexflow.nexflow_backend.service.AssistantService.ChatMessage;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -14,7 +16,12 @@ import java.util.Map;
 
 /**
  * REST endpoint for the NexFlow Assistant chatbot.
- * POST /api/assistant/chat — send a message, get a reply.
+ * POST /api/assistant/chat — send a message, get a reply (plus optional action buttons).
+ *
+ * Request:  { "message", "history": [{role, content}], "pageContext": {path, name},
+ *             "flow": {nodes, edges} (Studio canvas), "transactions": [...] (Studio recent runs) }
+ * Response: { "reply": "markdown", "actions": [{type: "RUN_FLOW", flowId, flowName, payload, label}],
+ *             "toolsUsed": ["list_executions", …], "provider": "ANTHROPIC" }
  */
 @Slf4j
 @RestController
@@ -27,56 +34,48 @@ public class AssistantController {
         this.assistantService = assistantService;
     }
 
-    /**
-     * Chat with the NexFlow Assistant.
-     *
-     * Request body:
-     *   { "message": "How do I use the VARIABLE node?",
-     *     "history": [{ "role": "user", "content": "..." }, { "role": "assistant", "content": "..." }] }
-     *
-     * Response:
-     *   { "reply": "The VARIABLE node lets you define..." }
-     */
+    /** Chat with the NexFlow Assistant (shapes in the class comment). */
     @PostMapping("/chat")
-    public ResponseEntity<Map<String, String>> chat(@RequestBody Map<String, Object> body,
+    public ResponseEntity<Map<String, Object>> chat(@RequestBody Map<String, Object> body,
                                                      @AuthenticationPrincipal NexUser user) {
-        String message = (String) body.get("message");
+        if (user == null) {
+            return ResponseEntity.status(401).body(Map.of("error", "Authentication required"));
+        }
+        String message = body.get("message") instanceof String m ? m : null;
         if (message == null || message.trim().length() < 2) {
             return ResponseEntity.badRequest()
                     .body(Map.of("error", "Message must be at least 2 characters."));
         }
 
-        // Parse history from request body
         List<ChatMessage> history = Collections.emptyList();
-        Object historyObj = body.get("history");
-        if (historyObj instanceof List<?> rawList) {
+        if (body.get("history") instanceof List<?> rawList) {
             history = rawList.stream()
                     .filter(Map.class::isInstance)
                     .map(item -> {
-                        @SuppressWarnings("unchecked")
-                        Map<String, String> map = (Map<String, String>) item;
-                        return new ChatMessage(
-                                map.getOrDefault("role", "user"),
-                                map.getOrDefault("content", "")
-                        );
+                        Map<?, ?> map = (Map<?, ?>) item;
+                        Object role = map.get("role");
+                        Object content = map.get("content");
+                        return new ChatMessage(role != null ? role.toString() : "user", content != null ? content.toString() : "");
                     })
                     .toList();
         }
 
-        // Optional page context sent by the frontend (e.g. { "path": "/studio/abc", "name": "Studio" })
-        @SuppressWarnings("unchecked")
-        Map<String, String> pageCtx = body.get("pageContext") instanceof Map<?, ?>
-                ? (Map<String, String>) body.get("pageContext")
-                : Collections.emptyMap();
-
-        if (user == null) {
-            return ResponseEntity.status(401).body(Map.of("error", "Authentication required"));
+        // Optional context: page the user is on, the Studio canvas, and that flow's recent runs.
+        Map<String, String> page = new java.util.HashMap<>();
+        if (body.get("pageContext") instanceof Map<?, ?> pc) {
+            pc.forEach((k, v) -> { if (k != null && v != null) page.put(k.toString(), v.toString()); });
         }
+        ChatContext context = new ChatContext(page, body.get("flow"), body.get("transactions"));
 
         try {
-            String reply = assistantService.chat(message.trim(), history, pageCtx, user.getId());
-            log.debug("[Assistant] chat ok replyChars={}", reply != null ? reply.length() : 0);
-            return ResponseEntity.ok(Map.of("reply", reply));
+            AssistantReply reply = assistantService.chat(message.trim(), history, context, user);
+            log.debug("[Assistant] chat ok replyChars={} tools={}", reply.reply().length(), reply.toolsUsed().size());
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            out.put("reply", reply.reply());
+            out.put("actions", reply.actions());
+            out.put("toolsUsed", reply.toolsUsed().stream().map(AssistantService.ToolUse::tool).toList());
+            out.put("provider", reply.provider());
+            return ResponseEntity.ok(out);
         } catch (IllegalStateException e) {
             log.warn("[Assistant] chat unavailable: {}", e.getMessage());
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));

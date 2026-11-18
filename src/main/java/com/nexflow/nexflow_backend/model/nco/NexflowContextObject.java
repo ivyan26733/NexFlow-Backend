@@ -142,7 +142,12 @@ public class NexflowContextObject {
         input.put("trigger", start != null ? start.getOutput() : null);
         input.put("nex", nex);
         LoopState loop = getInnermostLoop();
-        if (loop != null) input.put("loop", Map.of("index", loop.getIndex()));
+        // Same numbering as {{loop.index}} inside the body: the loop has already counted the current
+        // pass, so the 0-based index of the pass being run is one less.
+        if (loop != null) {
+            int index = Math.max(0, loop.getIndex() - 1);
+            input.put("loop", Map.of("index", index, "iteration", index + 1));
+        }
 
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("nex", nex);

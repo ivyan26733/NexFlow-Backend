@@ -1,6 +1,7 @@
 package com.nexflow.nexflow_backend.config;
 
 import com.nexflow.nexflow_backend.EdgeCondition;
+import com.nexflow.nexflow_backend.model.domain.ChannelPlatform;
 import com.nexflow.nexflow_backend.model.domain.LlmProvider;
 import com.nexflow.nexflow_backend.model.domain.NodeType;
 import lombok.RequiredArgsConstructor;
@@ -33,6 +34,7 @@ public class SchemaMaintenance {
         syncEnumCheck("flow_nodes", "node_type", NodeType.values());
         syncEnumCheck("flow_edges", "condition_type", EdgeCondition.values());
         syncEnumCheck("llm_provider_configs", "provider", LlmProvider.values());
+        syncEnumCheck("channel_connections", "platform", ChannelPlatform.values());
     }
 
     private void syncEnumCheck(String table, String column, Enum<?>[] values) {

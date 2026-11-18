@@ -28,6 +28,8 @@ public class RateLimitFilter extends OncePerRequestFilter {
 
     private final Map<String, Bucket> authBuckets  = new ConcurrentHashMap<>();
     private final Map<String, Bucket> pulseBuckets = new ConcurrentHashMap<>();
+    /** Chat webhooks come from the platforms' shared IPs, so they are limited per webhook URL instead. */
+    private final Map<String, Bucket> hookBuckets  = new ConcurrentHashMap<>();
 
     @Override
     protected void doFilterInternal(HttpServletRequest req,
@@ -48,6 +50,12 @@ public class RateLimitFilter extends OncePerRequestFilter {
             Bucket bucket = pulseBuckets.computeIfAbsent(ip, k -> buildBucket(30, Duration.ofMinutes(1)));
             if (!bucket.tryConsume(1)) {
                 sendRateLimited(res, "Too many flow trigger requests. Please slow down.");
+                return;
+            }
+        } else if (path.startsWith("/api/hooks/")) {
+            Bucket bucket = hookBuckets.computeIfAbsent(path, k -> buildBucket(120, Duration.ofMinutes(1)));
+            if (!bucket.tryConsume(1)) {
+                sendRateLimited(res, "Too many messages for this channel. Please slow down.");
                 return;
             }
         }

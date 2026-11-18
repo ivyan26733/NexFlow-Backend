@@ -20,8 +20,8 @@ public class LlmClientFactory {
         clientMap.put(LlmProvider.GROQ, new OpenAiCompatibleLlmClient(
             LlmProvider.GROQ,
             "https://api.groq.com/openai/v1/chat/completions",
-            "llama-3.3-70b-versatile",
-            new String[]{"llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it"}
+            "openai/gpt-oss-120b",
+            new String[]{"openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "allam-2-7b"}
         ));
         clientMap.put(LlmProvider.MISTRAL, new OpenAiCompatibleLlmClient(
             LlmProvider.MISTRAL,

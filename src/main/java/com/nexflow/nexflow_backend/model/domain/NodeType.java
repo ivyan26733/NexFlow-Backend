@@ -13,6 +13,8 @@ public enum NodeType {
     SUCCESS,
     FAILURE,
     AI,        // LLM node — uses LlmProviderConfig API keys, returns JSON
+    FILE,      // read an incoming file (CSV, Excel, PDF, Word, JSON, text) or write a new one
+    MESSAGE,   // send a message (and optionally a file) to Slack, Telegram, WhatsApp or Discord
 
     // Future nodes
     KAFKA_PRODUCER,

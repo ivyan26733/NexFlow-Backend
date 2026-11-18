@@ -71,6 +71,10 @@ public class SecurityConfig {
                 // Pulse is public on purpose so curl, webhooks, and JMeter can trigger flows.
                 // The rate limit filter still protects it from abuse.
                 .requestMatchers("/api/pulse/**").permitAll()
+                // Chat platform webhooks (Slack/Telegram/WhatsApp/Discord) — verified by platform signature
+                .requestMatchers("/api/hooks/**").permitAll()
+                // Signed, expiring file download links (checked in FileController)
+                .requestMatchers(HttpMethod.GET, "/api/files/public/**").permitAll()
                 // Actuator health only
                 .requestMatchers("/actuator/health").permitAll()
                 .requestMatchers("/actuator/**").hasRole("ADMIN")

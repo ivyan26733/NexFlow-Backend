@@ -47,6 +47,34 @@ public class ReferenceResolver {
         return result.toString();
     }
 
+    private static final com.fasterxml.jackson.databind.ObjectMapper TEXT_JSON = new com.fasterxml.jackson.databind.ObjectMapper();
+
+    /**
+     * Like {@link #resolve} but for human-facing text (chat messages, file contents): a reference to an
+     * object or list is written as JSON instead of Java's {@code {a=1}} form.
+     */
+    public String resolveForText(String template, NexflowContextObject nco) {
+        if (template == null || !template.contains("{{")) return template;
+        Matcher matcher = REF_PATTERN.matcher(template);
+        StringBuffer result = new StringBuffer();
+        while (matcher.find()) {
+            Object value = resolvePathOrExpression(matcher.group(1).trim(), nco, null);
+            String text;
+            if (value instanceof Map<?, ?> || value instanceof List<?>) {
+                try {
+                    text = TEXT_JSON.writeValueAsString(value);
+                } catch (Exception e) {
+                    text = String.valueOf(value);
+                }
+            } else {
+                text = value != null ? value.toString() : "";
+            }
+            matcher.appendReplacement(result, Matcher.quoteReplacement(text));
+        }
+        matcher.appendTail(result);
+        return result.toString();
+    }
+
     private Object resolvePathOrExpression(String path, NexflowContextObject nco, LoopState loopContext) {
         String op = null;
         int opIndex = -1;
