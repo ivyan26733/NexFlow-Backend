@@ -19,7 +19,9 @@ import java.util.Map;
  * Config shape:
  * {
  *   "language": "javascript",   // "javascript" or "python"
- *   "code":     "const items = nex.fetchOrders?.body?.items ?? []; return items.filter(i => i.active)"
+ *   "code":     "const items = nex.fetchOrders?.body?.items ?? []; return items.filter(i => i.active)",
+ *   "timeoutSeconds": 10,       // optional, max 300
+ *   "heavyCompute":   false     // optional: true turns off the infinite-loop CPU check (ML training etc.)
  * }
  *
  * The script subprocess receives a JSON file containing:
@@ -61,7 +63,10 @@ public class ScriptExecutor implements NodeExecutor {
         }
         int timeoutSeconds = node.configValue("timeoutSeconds", 10) instanceof Number n ? n.intValue() : 10;
 
-        ScriptRunner.ScriptResult result = scriptRunner.run(language, code, nco.toScriptData(), timeoutSeconds);
+        // "Heavy computation" (e.g. ML training) keeps a core busy on purpose: skip the infinite-loop check.
+        boolean cpuWatchdog = !Boolean.TRUE.equals(config.get("heavyCompute"));
+
+        ScriptRunner.ScriptResult result = scriptRunner.run(language, code, nco.toScriptData(), timeoutSeconds, cpuWatchdog);
         if (!result.success()) return failure(nodeId, result.error());
 
         boolean nullOutput = isNullOrEmptyResult(result.output());

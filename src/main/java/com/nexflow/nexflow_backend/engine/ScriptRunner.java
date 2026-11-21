@@ -98,18 +98,26 @@ public class ScriptRunner {
     }
 
     public ScriptResult run(String language, String userCode, Object inputData, int timeoutSeconds) {
+        return run(language, userCode, inputData, timeoutSeconds, true);
+    }
+
+    /**
+     * @param cpuWatchdog false for heavy but finite work (ML training, big data crunching) that
+     *                    legitimately keeps a core busy; the wall-clock timeout still applies.
+     */
+    public ScriptResult run(String language, String userCode, Object inputData, int timeoutSeconds, boolean cpuWatchdog) {
         // Clamp the timeout so one bad node config cannot run forever.
         int timeout = Math.min(Math.max(timeoutSeconds, 1), MAX_TIMEOUT_SECONDS);
         return switch (language.toLowerCase()) {
             case "javascript" -> {
                 String blocked = findBlockedPattern(userCode, JS_BLOCKED);
                 if (blocked != null) yield ScriptResult.error("Script uses blocked pattern: " + blocked);
-                yield runScript("js", buildJsWrapper(userCode), inputData, "node", timeout);
+                yield runScript("js", buildJsWrapper(userCode), inputData, "node", timeout, cpuWatchdog);
             }
             case "python" -> {
                 String blocked = findBlockedPattern(userCode, PY_BLOCKED);
                 if (blocked != null) yield ScriptResult.error("Script uses blocked pattern: " + blocked);
-                yield runScript("py", buildPyWrapper(userCode), inputData, "python3", timeout);
+                yield runScript("py", buildPyWrapper(userCode), inputData, "python3", timeout, cpuWatchdog);
             }
             default -> ScriptResult.error("Unsupported language: " + language + ". Use 'javascript' or 'python'.");
         };
@@ -156,11 +164,38 @@ public class ScriptRunner {
                 nex   = _data.get('nex',   {})
                 input = _data.get('input', {})
 
+                def _nf_jsonable(o):
+                    # Make the result valid JSON: NaN/inf -> null, numpy & pandas values -> plain Python.
+                    if o is None or isinstance(o, (bool, str)):
+                        return o
+                    if type(o).__name__ == 'NAType':                      # pandas.NA
+                        return None
+                    if isinstance(o, float):
+                        return o if o == o and o not in (float('inf'), float('-inf')) else None
+                    if isinstance(o, int):
+                        return o
+                    if isinstance(o, dict):
+                        return {str(k): _nf_jsonable(v) for k, v in o.items()}
+                    if isinstance(o, (list, tuple, set)):
+                        return [_nf_jsonable(v) for v in o]
+                    if hasattr(o, 'to_dict') and hasattr(o, 'columns'):   # pandas DataFrame -> rows
+                        return _nf_jsonable(o.to_dict('records'))
+                    if hasattr(o, 'to_dict'):                             # pandas Series -> {index: value}
+                        return _nf_jsonable(o.to_dict())
+                    if hasattr(o, 'isoformat'):                           # dates / timestamps (NaT -> null)
+                        try:
+                            return None if o != o else o.isoformat()
+                        except Exception:
+                            return str(o)
+                    if hasattr(o, 'tolist'):                              # numpy arrays and scalars
+                        return _nf_jsonable(o.tolist())
+                    return str(o)
+
                 try:
                 %s
-                    print(json.dumps({"success": True, "output": result}))
+                    print(json.dumps({"success": True, "output": _nf_jsonable(result)}, allow_nan=False))
                 except Exception as e:
-                    print(json.dumps({"success": False, "error": str(e)}))
+                    print(json.dumps({"success": False, "error": type(e).__name__ + ": " + str(e)}))
                 """.formatted(indentPython(userCode));
     }
 
@@ -168,7 +203,7 @@ public class ScriptRunner {
 
     @SuppressWarnings("unchecked")
     private ScriptResult runScript(String extension, String wrappedCode, Object inputData,
-                                   String interpreter, int timeoutSeconds) {
+                                   String interpreter, int timeoutSeconds, boolean cpuWatchdog) {
         Path scriptFile = null;
         Path inputFile  = null;
 
@@ -196,12 +231,12 @@ public class ScriptRunner {
 
             // ── Layer 1: CPU watchdog ─────────────────────────────────────────
             AtomicBoolean infiniteLoopKilled = new AtomicBoolean(false);
-            Thread watchdog = startCpuWatchdog(process, infiniteLoopKilled);
+            Thread watchdog = cpuWatchdog ? startCpuWatchdog(process, infiniteLoopKilled) : null;
             // The watchdog watches CPU usage. The waitFor() call below is the wall-clock timeout.
 
             // ── Layer 2: wall-clock timeout ───────────────────────────────────
             boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-            watchdog.interrupt(); // stop watchdog — process is done or timed out
+            if (watchdog != null) watchdog.interrupt(); // stop watchdog — process is done or timed out
 
             // Wait for drainer threads so stdout/stderr are fully read before we use them
             stdoutDrainer.join(5_000);
@@ -210,13 +245,15 @@ public class ScriptRunner {
             // Check watchdog result first — it killed the process before timeout fired
             if (infiniteLoopKilled.get()) {
                 return ScriptResult.error(
-                    "Infinite loop detected: script consumed 100%% CPU for " +
+                    "Infinite loop detected: script consumed 100% CPU for " +
                     (CPU_HIGH_CONSECUTIVE_SAMPLES * CPU_POLL_INTERVAL_MS / 1000) +
-                    " seconds continuously. Use a loop with a termination condition."
+                    " seconds continuously. Use a loop with a termination condition, or turn on " +
+                    "\"Heavy computation\" in the step's settings if the work is long but finite (e.g. ML training)."
                 );
             }
 
             if (!finished) {
+                process.descendants().forEach(ProcessHandle::destroyForcibly);
                 process.destroyForcibly();
                 return ScriptResult.error(
                     "Script timed out after " + timeoutSeconds + " seconds. " +
