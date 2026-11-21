@@ -321,6 +321,20 @@ class FlowExecutionEngineTest {
         assertThat(join.get("b").toString()).contains("FAILURE");
     }
 
+    @Test
+    void branchTraceKeepsOnlyWhatTheStepAdded() {
+        Map<String, Object> big = Map.of("rows", "x".repeat(FlowExecutionEngine.TRACE_LIMIT_CHARS + 10));
+        Map<String, Object> before = new HashMap<>(Map.of("start", Map.of(), "readOrders", big));
+        Map<String, Object> after = new HashMap<>(before);
+        after.put("cleanData", Map.of("result", 1));
+
+        Map<String, Object> added = FlowExecutionEngine.addedBy(before, after);
+
+        assertThat(added).containsOnlyKeys("cleanData");
+        assertThat(FlowExecutionEngine.forTrace(added)).isEqualTo(added);
+        assertThat(FlowExecutionEngine.forTrace(big)).containsKey("note").containsEntry("keys", List.of("rows"));
+    }
+
     private void buildForkFlow(String onBranchFailure) {
         FlowNode start = node("Start", NodeType.START);
         FlowNode fork = node("Fork", NodeType.FORK,

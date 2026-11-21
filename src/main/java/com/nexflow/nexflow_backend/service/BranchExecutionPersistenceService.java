@@ -9,6 +9,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -22,14 +23,14 @@ public class BranchExecutionPersistenceService {
     private final BranchExecutionRepository branchExecutionRepository;
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public void saveBranchExecution(String executionId, UUID forkNodeId, BranchResult result) {
+    public void saveBranchExecution(String executionId, UUID forkNodeId, BranchResult result, Map<String, Object> added) {
         BranchExecution record = new BranchExecution();
         record.setExecutionId(UUID.fromString(executionId));
         record.setForkNodeId(forkNodeId);
         record.setBranchName(result.branchName());
         record.setStatus(result.status());
         record.setDurationMs(result.durationMs());
-        record.setNexSnapshot(result.isSuccess() ? result.nex() : null);
+        record.setNexSnapshot(added);
         record.setErrorMessage(result.errorMessage());
         record.setCompletedAt(LocalDateTime.now());
         branchExecutionRepository.save(record);

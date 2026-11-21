@@ -1,5 +1,6 @@
 package com.nexflow.nexflow_backend.engine;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nexflow.nexflow_backend.model.domain.FlowNode;
 import com.nexflow.nexflow_backend.model.domain.NodeExecution;
 import com.nexflow.nexflow_backend.model.domain.NodeExecutionStatus;
@@ -17,6 +18,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashMap;
@@ -48,6 +50,10 @@ public class FlowExecutionEngine {
 
     /** Hard cap on steps per path so a runaway loop ends cleanly instead of running forever. */
     static final int MAX_STEPS = 5_000;
+
+    /** Largest value (as JSON) kept per branch step in node_executions and per branch in branch_executions. */
+    static final int TRACE_LIMIT_CHARS = 256 * 1024;
+    private static final ObjectMapper TRACE_JSON = new ObjectMapper().findAndRegisterModules();
 
     private final FlowNodeRepository nodeRepository;
     private final FlowEdgeRepository edgeRepository;
@@ -241,13 +247,40 @@ public class FlowExecutionEngine {
         record.setNodeType(node.getNodeType().name());
         record.setBranchName(branchName);
         record.setStatus(result.isError() ? NodeExecutionStatus.FAILURE : NodeExecutionStatus.SUCCESS);
-        record.setInputNex(nexBefore);
-        record.setOutputNex(new LinkedHashMap<>(nco.getNex()));
+        // Keep what this step received and what it added, not the whole run context: copying the full nex
+        // twice per branch step made data-heavy branches seconds slower per step and filled the database.
+        record.setInputNex(forTrace(result.getInput()));
+        record.setOutputNex(forTrace(addedBy(nexBefore, nco.getNex())));
         record.setErrorMessage(result.getErrorMessage());
         record.setErrorDetail(result.getErrorDetail());
         record.setStartedAt(started);
         record.setFinishedAt(Instant.now());
         record.setDurationMs(Duration.between(started, record.getFinishedAt()).toMillis());
         nodeExecutionPersistence.save(record);
+    }
+
+    /** The nex entries a step created or replaced (values are compared by reference, as in the FORK merge). */
+    public static Map<String, Object> addedBy(Map<String, Object> before, Map<String, Object> after) {
+        Map<String, Object> added = new LinkedHashMap<>();
+        after.forEach((k, v) -> {
+            if (before == null || !before.containsKey(k) || before.get(k) != v) added.put(k, v);
+        });
+        return added;
+    }
+
+    /** A value small enough to keep in the branch trace, or a note saying where the full value is. */
+    public static Map<String, Object> forTrace(Map<String, Object> value) {
+        if (value == null) return null;
+        String json;
+        try {
+            json = TRACE_JSON.writeValueAsString(value);
+        } catch (Exception e) {
+            return Map.of("note", "This value could not be shown in the trace.");
+        }
+        if (json.length() <= TRACE_LIMIT_CHARS) return value;
+        Map<String, Object> note = new LinkedHashMap<>();
+        note.put("note", "Too large to show here (" + json.length() / 1024 + " KB). The full value is in the run's context.");
+        note.put("keys", new ArrayList<>(value.keySet()));
+        return note;
     }
 }

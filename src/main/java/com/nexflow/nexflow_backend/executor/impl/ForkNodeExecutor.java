@@ -77,8 +77,11 @@ public class ForkNodeExecutor implements NodeExecutor {
         Settings settings = Settings.from(fork, branches.size());
         long startedAt = System.currentTimeMillis();
 
+        Map<String, Object> nexAtFork = new LinkedHashMap<>(nco.getNex());
         List<BranchResult> results = runBranches(branches, nco, settings);
-        results.forEach(r -> branchPersistence.saveBranchExecution(nco.getMeta().getExecutionId(), fork.getId(), r));
+        // Record what each branch added, not its full copy of the run context (that can be many MB per branch).
+        results.forEach(r -> branchPersistence.saveBranchExecution(nco.getMeta().getExecutionId(), fork.getId(), r,
+                r.isSuccess() ? FlowExecutionEngine.forTrace(FlowExecutionEngine.addedBy(nexAtFork, r.nex())) : null));
 
         String problem = settings.judge(results);
         if (problem != null) return failure(fork, problem);
