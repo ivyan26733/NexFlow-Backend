@@ -11,6 +11,7 @@ import com.nexflow.nexflow_backend.model.domain.NexusConnector;
 import com.nexflow.nexflow_backend.model.domain.UserRole;
 import com.nexflow.nexflow_backend.model.nco.ExecutionStatus;
 import com.nexflow.nexflow_backend.repository.ExecutionRepository;
+import com.nexflow.nexflow_backend.repository.ExecutionRow;
 import com.nexflow.nexflow_backend.repository.FlowEdgeRepository;
 import com.nexflow.nexflow_backend.repository.FlowNodeRepository;
 import com.nexflow.nexflow_backend.repository.FlowRepository;
@@ -142,7 +143,7 @@ public class AssistantTools {
 
     List<Map<String, Object>> listFlows(NexUser user) {
         List<Flow> visible = accessibleFlows(user);
-        Map<UUID, List<Execution>> recent = recentRuns(visible, 24);
+        Map<UUID, List<ExecutionRow>> recent = recentRuns(visible, 24);
         return visible.stream()
                 .sorted(Comparator.comparing(Flow::getUpdatedAt, Comparator.nullsLast(Comparator.reverseOrder())))
                 .map(f -> {
@@ -152,7 +153,7 @@ public class AssistantTools {
                     m.put("slug", f.getSlug());
                     m.put("status", f.getStatus().name());
                     if (f.getDescription() != null && !f.getDescription().isBlank()) m.put("description", trim(f.getDescription(), 200));
-                    List<Execution> runs = recent.getOrDefault(f.getId(), List.of());
+                    List<ExecutionRow> runs = recent.getOrDefault(f.getId(), List.of());
                     m.put("runs24h", runs.size());
                     m.put("failures24h", runs.stream().filter(e -> e.getStatus() == ExecutionStatus.FAILURE).count());
                     return m;
@@ -223,7 +224,7 @@ public class AssistantTools {
         Flow flow = flows.findById(e.getFlowId()).orElseThrow(() -> new IllegalArgumentException("That run's flow was deleted."));
         if (!groupService.hasFlowAccess(flow.getId(), flow.getUserId(), user)) throw new IllegalArgumentException("You don't have access to that run.");
 
-        Map<String, Object> out = summary(e, flow.getName());
+        Map<String, Object> out = summary(ExecutionRow.of(e), flow.getName());
         if (e.getErrorDetail() != null) out.put("errorDetail", trim(e.getErrorDetail(), 800));
         out.put("input", redact(e.getPayload() != null ? e.getPayload() : Map.of()));
 
@@ -261,7 +262,7 @@ public class AssistantTools {
             out.put("runs", 0);
             return out;
         }
-        List<Execution> runs = executions.findByFlowIdInAndStartedAtAfterOrderByStartedAtDesc(
+        List<ExecutionRow> runs = executions.findByFlowIdInAndStartedAtAfterOrderByStartedAtDesc(
                 new ArrayList<>(names.keySet()), Instant.now().minus(Duration.ofHours(hours)));
         long ok = runs.stream().filter(e -> e.getStatus() == ExecutionStatus.SUCCESS).count();
         long failed = runs.stream().filter(e -> e.getStatus() == ExecutionStatus.FAILURE).count();
@@ -271,7 +272,7 @@ public class AssistantTools {
         out.put("running", runs.size() - ok - failed);
         if (ok + failed > 0) out.put("successRate", Math.round(ok * 1000.0 / (ok + failed)) / 10.0 + "%");
         out.put("mostFailing", runs.stream().filter(e -> e.getStatus() == ExecutionStatus.FAILURE)
-                .collect(Collectors.groupingBy(Execution::getFlowId, Collectors.counting()))
+                .collect(Collectors.groupingBy(ExecutionRow::getFlowId, Collectors.counting()))
                 .entrySet().stream().sorted(Map.Entry.<UUID, Long>comparingByValue().reversed()).limit(5)
                 .map(en -> names.get(en.getKey()) + " (" + en.getValue() + ")").toList());
         return out;
@@ -385,14 +386,14 @@ public class AssistantTools {
                 + partial.stream().map(Flow::getName).limit(10).collect(Collectors.joining(", ")) + ". Be more specific.");
     }
 
-    private Map<UUID, List<Execution>> recentRuns(List<Flow> visible, int hours) {
+    private Map<UUID, List<ExecutionRow>> recentRuns(List<Flow> visible, int hours) {
         if (visible.isEmpty()) return Map.of();
         return executions.findByFlowIdInAndStartedAtAfterOrderByStartedAtDesc(
                         visible.stream().map(Flow::getId).toList(), Instant.now().minus(Duration.ofHours(hours)))
-                .stream().collect(Collectors.groupingBy(Execution::getFlowId));
+                .stream().collect(Collectors.groupingBy(ExecutionRow::getFlowId));
     }
 
-    private static Map<String, Object> summary(Execution e, String flowName) {
+    private static Map<String, Object> summary(ExecutionRow e, String flowName) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("executionId", e.getId().toString());
         m.put("flow", flowName);

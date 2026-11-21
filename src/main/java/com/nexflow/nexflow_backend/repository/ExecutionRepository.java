@@ -12,28 +12,29 @@ import java.util.Optional;
 import java.util.UUID;
 
 public interface ExecutionRepository extends JpaRepository<Execution, UUID> {
-    List<Execution> findByFlowIdOrderByStartedAtDesc(UUID flowId);
+    // Lists read only the small columns (see ExecutionRow); full runs are loaded one at a time by id
+    List<ExecutionRow> findRowsByFlowIdOrderByStartedAtDesc(UUID flowId);
      // All executions newest-first — used by the Transactions page
-     List<Execution> findAllByOrderByStartedAtDesc();
+     List<ExecutionRow> findAllByOrderByStartedAtDesc();
 
      // Scoped to a set of flow IDs — used for non-admin users
-     List<Execution> findByFlowIdInOrderByStartedAtDesc(List<UUID> flowIds);
+     List<ExecutionRow> findByFlowIdInOrderByStartedAtDesc(List<UUID> flowIds);
      List<Execution> findByStatusOrderByStartedAtDesc(ExecutionStatus status);
 
      // Count executions per flow — used for pulse stats
      long countByFlowId(UUID flowId);
 
      // Recent executions for AI diagnostics
-     List<Execution> findByFlowIdAndStartedAtAfterOrderByStartedAtDesc(UUID flowId, Instant since);
+     List<ExecutionRow> findByFlowIdAndStartedAtAfterOrderByStartedAtDesc(UUID flowId, Instant since);
 
      // Transactions page — time windows (startedAt is always set on insert)
-     List<Execution> findByStartedAtAfterOrderByStartedAtDesc(Instant since);
+     List<ExecutionRow> findByStartedAtAfterOrderByStartedAtDesc(Instant since);
 
-     List<Execution> findByStartedAtBetweenOrderByStartedAtDesc(Instant fromInclusive, Instant toInclusive);
+     List<ExecutionRow> findByStartedAtBetweenOrderByStartedAtDesc(Instant fromInclusive, Instant toInclusive);
 
-     List<Execution> findByFlowIdInAndStartedAtAfterOrderByStartedAtDesc(List<UUID> flowIds, Instant since);
+     List<ExecutionRow> findByFlowIdInAndStartedAtAfterOrderByStartedAtDesc(List<UUID> flowIds, Instant since);
 
-     List<Execution> findByFlowIdInAndStartedAtBetweenOrderByStartedAtDesc(List<UUID> flowIds, Instant fromInclusive, Instant toInclusive);
+     List<ExecutionRow> findByFlowIdInAndStartedAtBetweenOrderByStartedAtDesc(List<UUID> flowIds, Instant fromInclusive, Instant toInclusive);
 
      @Query("SELECT MAX(e.startedAt) FROM Execution e")
      Optional<Instant> findMaxStartedAt();

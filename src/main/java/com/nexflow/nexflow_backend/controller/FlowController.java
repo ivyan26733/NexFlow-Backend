@@ -298,14 +298,14 @@ public class FlowController {
     }
 
     @GetMapping("/{flowId}/executions")
-    public ResponseEntity<List<Execution>> getExecutions(@PathVariable UUID flowId,
+    public ResponseEntity<List<ExecutionRow>> getExecutions(@PathVariable UUID flowId,
                                                          @AuthenticationPrincipal NexUser user) {
         Flow flow = flowRepository.findById(flowId).orElse(null);
         if (flow == null) return ResponseEntity.notFound().build();
         if (user == null || !groupService.hasFlowAccess(flow.getId(), flow.getUserId(), user)) {
             return ResponseEntity.status(403).build();
         }
-        return ResponseEntity.ok(executionRepository.findByFlowIdOrderByStartedAtDesc(flowId));
+        return ResponseEntity.ok(executionRepository.findRowsByFlowIdOrderByStartedAtDesc(flowId));
     }
 
     /**
@@ -455,7 +455,7 @@ public class FlowController {
 
         // Removing the flow also removes its schedules, executions, nodes, and edges.
         scheduleRepository.deleteByFlowId(flowId);
-        executionRepository.deleteAll(executionRepository.findByFlowIdOrderByStartedAtDesc(flowId));
+        executionRepository.deleteAllByIdInBatch(executionRepository.findRowsByFlowIdOrderByStartedAtDesc(flowId).stream().map(ExecutionRow::getId).toList());
         nodeRepository.deleteAll(nodeRepository.findByFlowId(flowId));
         edgeRepository.deleteAll(edgeRepository.findByFlowId(flowId));
         flowRepository.deleteById(flowId);

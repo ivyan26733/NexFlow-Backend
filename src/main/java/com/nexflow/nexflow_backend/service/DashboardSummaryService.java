@@ -1,12 +1,12 @@
 package com.nexflow.nexflow_backend.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.nexflow.nexflow_backend.model.domain.Execution;
 import com.nexflow.nexflow_backend.model.domain.Flow;
 import com.nexflow.nexflow_backend.model.domain.FlowSaveLog;
 import com.nexflow.nexflow_backend.model.domain.NexUser;
 import com.nexflow.nexflow_backend.model.domain.UserRole;
 import com.nexflow.nexflow_backend.repository.ExecutionRepository;
+import com.nexflow.nexflow_backend.repository.ExecutionRow;
 import com.nexflow.nexflow_backend.repository.FlowRepository;
 import com.nexflow.nexflow_backend.repository.FlowSaveLogRepository;
 import lombok.RequiredArgsConstructor;
@@ -88,7 +88,7 @@ public class DashboardSummaryService {
         Map<UUID, Flow> flowsById = new HashMap<>();
         for (Flow f : flows) flowsById.put(f.getId(), f);
 
-        List<Execution> executions = flows.isEmpty()
+        List<ExecutionRow> executions = flows.isEmpty()
                 ? List.of()
                 : executionRepository.findByFlowIdInOrderByStartedAtDesc(flows.stream().map(Flow::getId).toList());
 
@@ -103,7 +103,7 @@ public class DashboardSummaryService {
                 .orElse(null);
 
         Map<UUID, long[]> agg = new HashMap<>();
-        for (Execution e : executions) {
+        for (ExecutionRow e : executions) {
             long[] a = agg.computeIfAbsent(e.getFlowId(), id -> new long[4]); // count, success, failure, totalMs
             a[0]++;
             if ("SUCCESS".equals(e.getStatus().name())) a[1]++;
@@ -139,7 +139,7 @@ public class DashboardSummaryService {
         if (topFlows.size() > 5) topFlows = topFlows.subList(0, 5);
 
         Map<String, Integer> peakBuckets = new HashMap<>();
-        for (Execution e : executions) {
+        for (ExecutionRow e : executions) {
             if (e.getStartedAt() == null) continue;
             if (!"PULSE".equals(e.getTriggeredBy())) continue;
             Instant i = e.getStartedAt();
@@ -163,7 +163,7 @@ public class DashboardSummaryService {
             LocalDate day = today.minusDays(i);
             dailyPerf.add(new DailyPerfItem(day.toString(), day.getDayOfWeek().getDisplayName(TextStyle.SHORT, Locale.ENGLISH), 0, 0, 0));
         }
-        for (Execution e : executions) {
+        for (ExecutionRow e : executions) {
             if (e.getStartedAt() == null) continue;
             String day = e.getStartedAt().atZone(ZoneId.systemDefault()).toLocalDate().toString();
             for (int i = 0; i < dailyPerf.size(); i++) {
@@ -178,7 +178,7 @@ public class DashboardSummaryService {
         List<Integer> hourlyHeat = new ArrayList<>();
         for (int i = 0; i < 24; i++) hourlyHeat.add(0);
         Instant cutoff = Instant.now().minus(Duration.ofDays(7));
-        for (Execution e : executions) {
+        for (ExecutionRow e : executions) {
             if (e.getStartedAt() == null || e.getStartedAt().isBefore(cutoff)) continue;
             int hour = e.getStartedAt().atZone(ZoneId.systemDefault()).getHour();
             hourlyHeat.set(hour, hourlyHeat.get(hour) + 1);
@@ -193,7 +193,7 @@ public class DashboardSummaryService {
         }
         Instant cutoff365 = Instant.now().minus(Duration.ofDays(365));
         // Executions
-        for (Execution e : executions) {
+        for (ExecutionRow e : executions) {
             if (e.getStartedAt() == null || e.getStartedAt().isBefore(cutoff365)) continue;
             String day = e.getStartedAt().atZone(zone).toLocalDate().toString();
             activityGrid.merge(day, 1, Integer::sum);

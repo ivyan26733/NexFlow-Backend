@@ -7,6 +7,7 @@ import com.nexflow.nexflow_backend.model.domain.*;
 import com.nexflow.nexflow_backend.model.nco.ExecutionStatus;
 import com.nexflow.nexflow_backend.repository.BranchExecutionRepository;
 import com.nexflow.nexflow_backend.repository.ExecutionRepository;
+import com.nexflow.nexflow_backend.repository.ExecutionRow;
 import com.nexflow.nexflow_backend.repository.NodeExecutionRepository;
 import com.nexflow.nexflow_backend.repository.FlowRepository;
 import com.nexflow.nexflow_backend.service.ExecutionListCacheService;
@@ -125,7 +126,7 @@ public class ExecutionController {
             }
         }
 
-        List<Execution> windowed = loadWindowedExecutions(user);
+        List<ExecutionRow> windowed = loadWindowedExecutions(user);
         List<ExecutionSummary> summaries = toSummaries(windowed);
 
         try {
@@ -142,7 +143,7 @@ public class ExecutionController {
     }
 
     private List<ExecutionSummary> listAllFromDatabase(NexUser user) {
-        List<Execution> executions;
+        List<ExecutionRow> executions;
         if (user.getRole() == UserRole.ADMIN) {
             executions = executionRepository.findAllByOrderByStartedAtDesc();
         } else {
@@ -155,11 +156,11 @@ public class ExecutionController {
     /**
      * Last 2 days from now; if empty, last 2 days ending at the newest {@code startedAt} in scope (anchor window).
      */
-    private List<Execution> loadWindowedExecutions(NexUser user) {
+    private List<ExecutionRow> loadWindowedExecutions(NexUser user) {
         Instant now = Instant.now();
         Instant since = now.minus(RECENT_WINDOW);
         if (user.getRole() == UserRole.ADMIN) {
-            List<Execution> execs = executionRepository.findByStartedAtAfterOrderByStartedAtDesc(since);
+            List<ExecutionRow> execs = executionRepository.findByStartedAtAfterOrderByStartedAtDesc(since);
             if (!execs.isEmpty()) {
                 log.info("[Execution] window=ROLLING_2D admin=true since={} count={}", since, execs.size());
                 return execs;
@@ -170,7 +171,7 @@ public class ExecutionController {
                 return List.of();
             }
             Instant anchor = maxOpt.get();
-            List<Execution> anchored = executionRepository.findByStartedAtBetweenOrderByStartedAtDesc(
+            List<ExecutionRow> anchored = executionRepository.findByStartedAtBetweenOrderByStartedAtDesc(
                     anchor.minus(RECENT_WINDOW), anchor);
             log.info("[Execution] window=ANCHOR admin=true anchor={} count={} (no rows in last 2d)", anchor, anchored.size());
             return anchored;
@@ -180,7 +181,7 @@ public class ExecutionController {
             log.info("[Execution] window=EMPTY userId={} (no accessible flows)", user.getId());
             return List.of();
         }
-        List<Execution> execs = executionRepository.findByFlowIdInAndStartedAtAfterOrderByStartedAtDesc(flowIds, since);
+        List<ExecutionRow> execs = executionRepository.findByFlowIdInAndStartedAtAfterOrderByStartedAtDesc(flowIds, since);
         if (!execs.isEmpty()) {
             log.info("[Execution] window=ROLLING_2D userId={} since={} count={}", user.getId(), since, execs.size());
             return execs;
@@ -191,15 +192,15 @@ public class ExecutionController {
             return List.of();
         }
         Instant anchor = maxOpt.get();
-        List<Execution> anchored = executionRepository.findByFlowIdInAndStartedAtBetweenOrderByStartedAtDesc(
+        List<ExecutionRow> anchored = executionRepository.findByFlowIdInAndStartedAtBetweenOrderByStartedAtDesc(
                 flowIds, anchor.minus(RECENT_WINDOW), anchor);
         log.info("[Execution] window=ANCHOR userId={} anchor={} count={} (no rows in last 2d)", user.getId(), anchor, anchored.size());
         return anchored;
     }
 
-    private List<ExecutionSummary> toSummaries(List<Execution> executions) {
+    private List<ExecutionSummary> toSummaries(List<ExecutionRow> executions) {
         List<UUID> flowIds = executions.stream()
-                .map(Execution::getFlowId)
+                .map(ExecutionRow::getFlowId)
                 .distinct()
                 .toList();
         Map<UUID, Flow> flowsById = flowRepository.findAllById(flowIds).stream()
@@ -282,7 +283,7 @@ public class ExecutionController {
             return List.of();
         }
         Instant since = Instant.now().minusSeconds((long) hours * 3600);
-        List<Execution> executions = executionRepository
+        List<ExecutionRow> executions = executionRepository
                 .findByFlowIdAndStartedAtAfterOrderByStartedAtDesc(flowId, since)
                 .stream().limit(10).toList();
 
@@ -346,7 +347,7 @@ public class ExecutionController {
 
     // ── DTOs ─────────────────────────────────────────────────────────────────
 
-    private ExecutionSummary toSummary(Execution e, Map<UUID, Flow> flowsById) {
+    private ExecutionSummary toSummary(ExecutionRow e, Map<UUID, Flow> flowsById) {
         Flow flow = flowsById.get(e.getFlowId());
     
         String flowName = flow != null && flow.getName() != null
