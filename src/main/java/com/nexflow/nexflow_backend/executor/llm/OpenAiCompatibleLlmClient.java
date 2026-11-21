@@ -1,5 +1,6 @@
 package com.nexflow.nexflow_backend.executor.llm;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nexflow.nexflow_backend.model.domain.LlmProvider;
 import com.nexflow.nexflow_backend.model.llm.LlmRequest;
@@ -70,6 +71,10 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             body.put("messages", messages);
             body.put("max_tokens", req.getMaxTokens());
             body.put("temperature", req.getTemperature());
+            // gpt-oss spends completion tokens on reasoning; on Groq those count against tight per-minute limits.
+            if (provider == LlmProvider.GROQ && model.startsWith("openai/gpt-oss")) {
+                body.put("reasoning_effort", "low");
+            }
             // Use JSON mode only when the caller declared an outputSchema (AI nodes).
             // For assistant chat, outputSchema is null → omit response_format so the
             // model returns plain prose instead of a JSON object.
@@ -97,6 +102,10 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             @SuppressWarnings("unchecked")
             Map<String, Object> message = (Map<String, Object>) choices.get(0).get("message");
             String text = (String) message.get("content");
+            if ((text == null || text.isBlank()) && message.get("reasoning") instanceof String reasoning) {
+                // gpt-oss on Groq sometimes leaves content empty and ends its reasoning with the JSON it meant to send.
+                text = trailingJson(reasoning);
+            }
             @SuppressWarnings("unchecked")
             Map<String, Object> usage = (Map<String, Object>) resp.get("usage");
             int inputTokens = usage != null ? ((Number) usage.getOrDefault("prompt_tokens", 0)).intValue() : 0;
@@ -107,6 +116,23 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             log.error("[{}] Exception calling API", provider, e);
             return LlmResponse.error(provider.getDisplayName() + " client exception: " + e.getMessage());
         }
+    }
+
+    /** The JSON object (or array) that {@code text} ends with, or null. */
+    String trailingJson(String text) {
+        String t = text.strip();
+        if (!t.endsWith("}") && !t.endsWith("]")) return null;
+        char open = t.endsWith("}") ? '{' : '[';
+        for (int i = t.indexOf(open); i >= 0; i = t.indexOf(open, i + 1)) {
+            String candidate = t.substring(i);
+            try {
+                mapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(candidate);
+                return candidate;
+            } catch (Exception ignored) {
+                // not a complete JSON value from here — try the next opening bracket
+            }
+        }
+        return null;
     }
 
     private String extractError(String body) {

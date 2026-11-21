@@ -33,14 +33,33 @@ import java.util.regex.Pattern;
  * replies with a single JSON line {"tool": "...", "args": {...}}, we run it (see {@link AssistantTools})
  * and call the model again with the result, up to {@link #MAX_TOOL_CALLS} times. Any other reply is the
  * final answer. This works the same with Claude, GPT, Gemini, Groq, Mistral or a custom endpoint.
+ *
+ * Providers with small per-minute token limits (Groq's free tier allows 8,000) get a {@link Budget#SMALL}
+ * request: only the knowledge sections relevant to the question, trimmed context and one tool call.
  */
 @Service
 public class AssistantService {
 
     private static final Logger log = LoggerFactory.getLogger(AssistantService.class);
     private static final String PROMPT_PATH = "assistant/prompt.md";
-    private static final String KNOWLEDGE_BASE = loadKnowledgeBase();
+    private static final AssistantKnowledge KNOWLEDGE = new AssistantKnowledge(loadKnowledgeBase());
     static final int MAX_TOOL_CALLS = 5;
+    /** When the provider says "try again in Ns", wait and retry — up to this many times and this long in total. */
+    private static final int MAX_RATE_LIMIT_RETRIES = 3;
+    private static final double MAX_RATE_LIMIT_WAIT_SECONDS = 25;
+    private static final Pattern RETRY_AFTER = Pattern.compile("(?i)try again in ([0-9.]+)\\s*(ms|s)");
+
+    /** How much one request may carry. Limits are in characters (about 4 per token). */
+    record Budget(int knowledgeChars, int contextChars, int toolResultChars, int maxToolCalls, int maxTokens,
+                  int historyMessages, int historyChars) {
+        static final Budget FULL = new Budget(Integer.MAX_VALUE, 60_000, 12_000, MAX_TOOL_CALLS, 2048, 20, 4_000);
+        /** About 3k tokens per request, so a question plus one tool call fits in 8k tokens per minute. */
+        static final Budget SMALL = new Budget(4_000, 2_200, 2_000, 1, 900, 4, 300);
+
+        static Budget forProvider(LlmProvider provider) {
+            return provider == LlmProvider.GROQ || provider == LlmProvider.MLVOCA ? SMALL : FULL;
+        }
+    }
     private static final Pattern STUDIO_PATH = Pattern.compile("^/studio/([0-9a-fA-F-]{36})");
     private static final Pattern TRANSACTION_PATH = Pattern.compile("^/transactions/([0-9a-fA-F-]{36})");
 
@@ -48,7 +67,8 @@ public class AssistantService {
     private static final List<LlmProvider> PREFERENCE = List.of(LlmProvider.ANTHROPIC, LlmProvider.OPENAI,
             LlmProvider.GEMINI, LlmProvider.MISTRAL, LlmProvider.GROQ, LlmProvider.CUSTOM, LlmProvider.MLVOCA);
 
-    private static final String TOOL_GUIDE = """
+    private static String toolGuide(int maxToolCalls) {
+        return """
 
             ================================================================
             LIVE WORKSPACE TOOLS
@@ -68,7 +88,8 @@ public class AssistantService {
             - Link to pages with markdown links using app paths, e.g. [Open in Studio](/studio/<id>), [See the run](/transactions/<id>),
               [Channels](/channels), [Files](/files).
             - The final answer is plain text / markdown, never a JSON object.
-            """.formatted(MAX_TOOL_CALLS, AssistantTools.CATALOG);
+            """.formatted(maxToolCalls, AssistantTools.CATALOG);
+    }
 
     private final LlmClientFactory clientFactory;
     private final LlmProviderConfigRepository providerConfigRepo;
@@ -101,26 +122,32 @@ public class AssistantService {
                 .orElseThrow(() -> new IllegalStateException(
                         "No LLM provider configured. Go to Settings → AI Providers and add one."));
         LlmClient client = clientFactory.getClient(config.getProvider());
+        Budget budget = Budget.forProvider(config.getProvider());
 
-        String preamble = buildPreamble(history, context, user);
+        Map<String, String> page = context != null && context.page() != null ? context.page() : Map.of();
+        String knowledge = budget == Budget.FULL
+                ? KNOWLEDGE.full()
+                : KNOWLEDGE.compact(message + " " + page.getOrDefault("name", ""), budget.knowledgeChars());
+        String systemPrompt = knowledge + toolGuide(budget.maxToolCalls());
+        String preamble = buildPreamble(history, context, user, budget);
         List<AssistantTools.Action> actions = new ArrayList<>();
         List<ToolUse> used = new ArrayList<>();
         StringBuilder scratch = new StringBuilder();
 
         for (int step = 0; ; step++) {
-            boolean lastChance = step >= MAX_TOOL_CALLS;
+            boolean lastChance = step >= budget.maxToolCalls();
             StringBuilder prompt = new StringBuilder(preamble).append("User: ").append(message.trim()).append("\n");
             if (!scratch.isEmpty()) prompt.append("\n").append(scratch);
             prompt.append(lastChance
                     ? "\nYou have used all your tool calls. Write the final answer now from what you know (no JSON)."
                     : "\nReply with a tool call (one JSON line) or your final answer.");
 
-            String reply = ask(client, config, prompt.toString(), 2048);
+            String reply = ask(client, config, systemPrompt, prompt.toString(), budget.maxTokens());
             ToolUse call = lastChance ? null : parseToolCall(reply);
             if (call == null) {
                 return new AssistantReply(finalText(reply), actions, used, config.getProvider().name());
             }
-            String result = tools.call(call.tool(), call.args(), user, actions);
+            String result = clip(tools.call(call.tool(), call.args(), user, actions), budget.toolResultChars());
             used.add(call);
             log.debug("[Assistant] tool {} args={} → {} chars", call.tool(), call.args(), result.length());
             scratch.append("TOOL CALL: ").append(toJson(Map.of("tool", call.tool(), "args", call.args()))).append("\n")
@@ -128,24 +155,60 @@ public class AssistantService {
         }
     }
 
-    private String ask(LlmClient client, LlmProviderConfig config, String userPrompt, int maxTokens) {
+    private String ask(LlmClient client, LlmProviderConfig config, String systemPrompt, String userPrompt, int maxTokens) {
         // outputSchema is intentionally NOT set so Gemini uses text/plain mode.
         LlmRequest request = new LlmRequest();
-        request.setSystemPrompt(KNOWLEDGE_BASE + TOOL_GUIDE);
+        request.setSystemPrompt(systemPrompt);
         request.setUserPrompt(userPrompt);
         request.setModel(client.getDefaultModel());
         request.setMaxTokens(maxTokens);
         request.setTemperature(0.2);
         LlmResponse response = client.call(request, config.getApiKey(), config.getCustomEndpoint());
+        double waited = 0;
+        for (int retry = 0; retry < MAX_RATE_LIMIT_RETRIES && !response.isSuccess(); retry++) {
+            Double wait = retryAfterSeconds(response.getErrorMessage());
+            if (wait == null || waited + wait > MAX_RATE_LIMIT_WAIT_SECONDS) break;
+            log.info("[Assistant] rate limited, retrying in {}s", wait);
+            try {
+                Thread.sleep((long) (wait * 1000) + 250);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            waited += wait;
+            response = client.call(request, config.getApiKey(), config.getCustomEndpoint());
+        }
         if (!response.isSuccess()) {
             log.error("[Assistant] LLM call failed: {}", response.getErrorMessage());
-            throw new RuntimeException("Assistant LLM call failed: " + response.getErrorMessage());
+            throw new RuntimeException(friendlyError(config.getProvider(), response.getErrorMessage()));
         }
         return response.getRawText() != null ? response.getRawText().trim() : "";
     }
 
+    /** Seconds the provider asked us to wait ("Please try again in 7.5s"), or null if it isn't a rate limit. */
+    static Double retryAfterSeconds(String error) {
+        if (error == null || !(error.contains("429") || error.toLowerCase().contains("rate limit"))) return null;
+        Matcher m = RETRY_AFTER.matcher(error);
+        if (!m.find()) return null;
+        double value = Double.parseDouble(m.group(1));
+        return "ms".equalsIgnoreCase(m.group(2)) ? value / 1000 : value;
+    }
+
+    static String friendlyError(LlmProvider provider, String error) {
+        String e = error == null ? "" : error;
+        boolean tooBig = e.contains("413") || e.toLowerCase().contains("request too large");
+        boolean limited = e.contains("429") || e.toLowerCase().contains("rate limit");
+        if (tooBig || limited) {
+            return provider.getDisplayName() + " is over its per-minute usage limit"
+                    + (tooBig ? " for a question this size" : "")
+                    + ". Wait a minute and ask again, ask a shorter question, or add a provider with higher limits "
+                    + "in Settings → AI Providers. (" + e + ")";
+        }
+        return "Assistant LLM call failed: " + e;
+    }
+
     /** Page, workspace overview, Studio canvas, recent runs and conversation history. */
-    private String buildPreamble(List<ChatMessage> history, ChatContext ctx, NexUser user) {
+    private String buildPreamble(List<ChatMessage> history, ChatContext ctx, NexUser user, Budget budget) {
         StringBuilder p = new StringBuilder();
         Map<String, String> page = ctx != null && ctx.page() != null ? ctx.page() : Map.of();
         String path = page.getOrDefault("path", "");
@@ -155,37 +218,52 @@ public class AssistantService {
         }
         p.append("USER: ").append(user.getName() != null ? user.getName() : user.getEmail())
                 .append(" (role ").append(user.getRole()).append(")\n\n");
+        // What the user is looking at right now comes first; the overview gets whatever budget is left.
+        int[] room = { budget.contextChars() };
+        Matcher studio = STUDIO_PATH.matcher(path);
+        Matcher txn = TRANSACTION_PATH.matcher(path);
+        if (ctx != null && ctx.flowSnapshot() != null) {
+            appendBlock(p, "FLOW OPEN IN STUDIO (unsaved canvas as the user sees it)",
+                    tools.toJson(AssistantTools.redact(mapper.convertValue(ctx.flowSnapshot(), Object.class))), room);
+        } else if (studio.find()) {
+            appendBlock(p, "FLOW OPEN IN STUDIO", tools.call("get_flow", Map.of("flow", studio.group(1)), user, new ArrayList<>()), room);
+        }
+        if (txn.find()) {
+            appendBlock(p, "RUN THE USER IS VIEWING", tools.call("get_execution", Map.of("executionId", txn.group(1)), user, new ArrayList<>()), room);
+        }
+        if (ctx != null && ctx.transactions() != null) {
+            appendBlock(p, "RECENT RUNS OF THIS FLOW (sent by Studio)",
+                    tools.toJson(AssistantTools.redact(mapper.convertValue(ctx.transactions(), Object.class))), room);
+        }
         try {
-            p.append("WORKSPACE OVERVIEW (live):\n").append(tools.overview(user)).append("\n\n");
+            appendBlock(p, "WORKSPACE OVERVIEW (live)", tools.overview(user), room);
         } catch (Exception e) {
             log.warn("[Assistant] overview failed: {}", e.getMessage());
         }
 
-        // What the user is looking at right now.
-        Matcher studio = STUDIO_PATH.matcher(path);
-        Matcher txn = TRANSACTION_PATH.matcher(path);
-        if (ctx != null && ctx.flowSnapshot() != null) {
-            p.append("FLOW OPEN IN STUDIO (unsaved canvas as the user sees it):\n")
-                    .append(tools.toJson(AssistantTools.redact(mapper.convertValue(ctx.flowSnapshot(), Object.class)))).append("\n\n");
-        } else if (studio.find()) {
-            p.append("FLOW OPEN IN STUDIO:\n").append(tools.call("get_flow", Map.of("flow", studio.group(1)), user, new ArrayList<>())).append("\n\n");
-        }
-        if (txn.find()) {
-            p.append("RUN THE USER IS VIEWING:\n").append(tools.call("get_execution", Map.of("executionId", txn.group(1)), user, new ArrayList<>())).append("\n\n");
-        }
-        if (ctx != null && ctx.transactions() != null) {
-            p.append("RECENT RUNS OF THIS FLOW (sent by Studio):\n")
-                    .append(tools.toJson(AssistantTools.redact(mapper.convertValue(ctx.transactions(), Object.class)))).append("\n\n");
-        }
-
         if (history != null && !history.isEmpty()) {
             p.append("CONVERSATION HISTORY:\n");
-            for (ChatMessage msg : history.subList(Math.max(0, history.size() - 20), history.size())) {
-                p.append("user".equals(msg.role()) ? "User: " : "Assistant: ").append(msg.content()).append("\n");
+            int from = Math.max(0, history.size() - budget.historyMessages());
+            for (ChatMessage msg : history.subList(from, history.size())) {
+                p.append("user".equals(msg.role()) ? "User: " : "Assistant: ")
+                        .append(clip(msg.content(), budget.historyChars())).append("\n");
             }
             p.append("\n---\n\n");
         }
         return p.toString();
+    }
+
+    /** Appends a context block clipped to the room left, and uses that room up. Skips it when nothing is left. */
+    private static void appendBlock(StringBuilder p, String title, String text, int[] room) {
+        if (text == null || text.isBlank() || room[0] < 200) return;
+        String clipped = clip(text, room[0]);
+        room[0] -= clipped.length();
+        p.append(title).append(":\n").append(clipped).append("\n\n");
+    }
+
+    static String clip(String text, int max) {
+        if (text == null || text.length() <= max) return text;
+        return text.substring(0, Math.max(0, max - 40)) + "\n… (truncated to fit the request limit)";
     }
 
     // ── Reply parsing ────────────────────────────────────────────────────────
