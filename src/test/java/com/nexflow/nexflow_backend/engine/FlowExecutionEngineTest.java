@@ -65,6 +65,7 @@ class FlowExecutionEngineTest {
                 new Terminal(NodeType.FAILURE),
                 new FalseDecision(),
                 new LoopExecutor(new ReferenceResolver(), mapper),
+                new com.nexflow.nexflow_backend.executor.VariableExecutor(new ReferenceResolver()),
                 new ForkNodeExecutor(engineProvider, mock(BranchExecutionPersistenceService.class), branchPool),
                 new JoinNodeExecutor());
         NodeExecutorRegistry registry = new NodeExecutorRegistry(executors);
@@ -212,6 +213,39 @@ class FlowExecutionEngineTest {
         assertThat(result.getMeta().getStatus()).isEqualTo(ExecutionStatus.FAILURE);
         assertThat(result.getMeta().getErrorMessage()).contains("circle");
         assertThat(runCount("A")).isZero();
+    }
+
+    @Test
+    void everyStepCanBeReadByItsNameIncludingVariablesAndLoops() {
+        FlowNode start = node("Start", NodeType.START);
+        FlowNode vars = node("Set Limits", NodeType.VARIABLE, Map.of("variables", Map.of("max", "2", "label", "x")));
+        FlowNode loop = node("Page Loop", NodeType.LOOP, Map.of("condition", "{{loop.index}} < {{nex.setLimits.max}}"));
+        FlowNode body = work("Fetch Page");
+        FlowNode after = work("After", Map.of("echo", "{{nex.pageLoop.iterationCount}}/{{nex.setLimits.max}}/{{nex.max}}/{{nex.fetchPage.ran}}"));
+        FlowNode done = node("Done", NodeType.SUCCESS);
+        connect(start, vars);
+        connect(vars, loop);
+        connect(loop, body, EdgeCondition.CONTINUE, "continue");
+        connect(body, loop, EdgeCondition.SUCCESS, "success");
+        connect(loop, after, EdgeCondition.SUCCESS, "exit");
+        connect(after, done, EdgeCondition.SUCCESS, "success");
+
+        NexflowContextObject result = run();
+
+        assertThat(result.getMeta().getStatus()).isEqualTo(ExecutionStatus.SUCCESS);
+        assertThat(runCount("Fetch Page")).isEqualTo(2);
+        assertThat(result.getNex().get("after")).isEqualTo(Map.of("ran", "After", "echo", "2/2/2/Fetch Page"));
+    }
+
+    @Test
+    void aVariableNamedLikeItsStepKeepsTheVariable() {
+        FlowNode start = node("Start", NodeType.START);
+        FlowNode vars = node("Limit", NodeType.VARIABLE, Map.of("variables", Map.of("limit", "7")));
+        FlowNode done = node("Done", NodeType.SUCCESS);
+        connect(start, vars);
+        connect(vars, done);
+
+        assertThat(run().getNex().get("limit")).isEqualTo(7);
     }
 
     // ── Loops ────────────────────────────────────────────────────────────────

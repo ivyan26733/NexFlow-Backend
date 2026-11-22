@@ -7,6 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
@@ -29,7 +30,13 @@ public class ReferenceResolver {
 
     /** Same as resolve(template, nco) but with optional loop context for {{loop.index}} and {{loop.accumulated}}. */
     public String resolve(String template, NexflowContextObject nco, LoopState loopContext) {
-        if (template == null || !template.contains("{{")) return template;
+        if (template == null) return null;
+        if (!template.contains("{{")) {
+            // A field holding only a reference works without braces: "nex.order.total" == "{{nex.order.total}}".
+            // If nothing is there it stays as typed, so a file name like "input.csv" is left alone.
+            Object value = isWholeReference(template) ? resolvePath(template.trim(), nco, loopContext) : null;
+            return value != null ? value.toString() : template;
+        }
 
         Matcher matcher = REF_PATTERN.matcher(template);
         StringBuffer result = new StringBuffer();
@@ -41,7 +48,7 @@ public class ReferenceResolver {
                 log.warn("Reference resolved to null: {{}} — check path and that START output.body is set", path);
             }
             // Do not log for missing nex keys — optional references, case-sensitive
-            matcher.appendReplacement(result, value != null ? value.toString() : "");
+            matcher.appendReplacement(result, Matcher.quoteReplacement(value != null ? value.toString() : ""));
         }
         matcher.appendTail(result);
         return result.toString();
@@ -54,25 +61,51 @@ public class ReferenceResolver {
      * object or list is written as JSON instead of Java's {@code {a=1}} form.
      */
     public String resolveForText(String template, NexflowContextObject nco) {
-        if (template == null || !template.contains("{{")) return template;
+        if (template == null) return null;
+        if (!template.contains("{{")) {
+            Object value = isWholeReference(template) ? resolvePath(template.trim(), nco, null) : null;
+            return value != null ? asText(value) : template;
+        }
         Matcher matcher = REF_PATTERN.matcher(template);
         StringBuffer result = new StringBuffer();
         while (matcher.find()) {
             Object value = resolvePathOrExpression(matcher.group(1).trim(), nco, null);
-            String text;
-            if (value instanceof Map<?, ?> || value instanceof List<?>) {
-                try {
-                    text = TEXT_JSON.writeValueAsString(value);
-                } catch (Exception e) {
-                    text = String.valueOf(value);
-                }
-            } else {
-                text = value != null ? value.toString() : "";
-            }
-            matcher.appendReplacement(result, Matcher.quoteReplacement(text));
+            matcher.appendReplacement(result, Matcher.quoteReplacement(asText(value)));
         }
         matcher.appendTail(result);
         return result.toString();
+    }
+
+    private static String asText(Object value) {
+        if (value instanceof Map<?, ?> || value instanceof List<?>) {
+            try {
+                return TEXT_JSON.writeValueAsString(value);
+            } catch (Exception e) {
+                return String.valueOf(value);
+            }
+        }
+        return value != null ? value.toString() : "";
+    }
+
+    /** One path segment: ".name", ".0", "[0]", or "[\"any key\"]" / "['any key']". */
+    private static final String SEGMENT = "(?:\\.[^\\s.\\[\\]{}]+|\\[\\d+]|\\[\"[^\"]*\"]|\\['[^']*'])";
+    private static final String PATH = "(?:nex|variables|nodes|loop|meta|input)" + SEGMENT + "+";
+    private static final Pattern WHOLE_REF = Pattern.compile("\\s*" + PATH + "\\s*");
+
+    /**
+     * True when the whole value is a single reference written without braces, e.g. "nex.order.items[0].sku".
+     * Text with anything else in it ("Total: nex.total") is not, so plain words are never rewritten.
+     */
+    public static boolean isWholeReference(String s) {
+        return s != null && WHOLE_REF.matcher(s).matches();
+    }
+
+    /** "{{nex.x}}", "{{ nex.x }}" or "nex.x" — a field that holds exactly one reference. */
+    public static boolean isSingleReference(String s) {
+        if (s == null) return false;
+        String t = s.trim();
+        if (t.startsWith("{{") && t.endsWith("}}") && t.indexOf("{{", 2) < 0) return true;
+        return isWholeReference(t);
     }
 
     private Object resolvePathOrExpression(String path, NexflowContextObject nco, LoopState loopContext) {
@@ -91,11 +124,19 @@ public class ReferenceResolver {
         if (op != null && opIndex >= 0) {
             String leftStr = path.substring(0, opIndex).trim();
             String rightStr = path.substring(opIndex + opLength).trim();
-            Object left = resolvePath(leftStr, nco, loopContext);
-            Object right = resolvePath(rightStr, nco, loopContext);
+            Object left = operand(leftStr, nco, loopContext);
+            Object right = operand(rightStr, nco, loopContext);
             return evaluateOp(op, left, right);
         }
         return resolvePath(path, nco, loopContext);
+    }
+
+    /** A side of "a + b": a number written in place ({{nex.qty * 2}}) or a path. */
+    private Object operand(String s, NexflowContextObject nco, LoopState loopContext) {
+        if (s.matches("-?\\d{1,15}(\\.\\d{1,15})?")) {
+            return s.contains(".") ? (Object) Double.parseDouble(s) : (Object) Long.parseLong(s);
+        }
+        return resolvePath(s, nco, loopContext);
     }
 
     private Object evaluateOp(String op, Object left, Object right) {
@@ -207,12 +248,12 @@ public class ReferenceResolver {
             path = path.substring(6).trim();
         }
         if (path == null || path.isBlank()) return null;
-        String[] parts = path.split("\\.");
         // nex.NAME.field — universal flat container; keys are case-sensitive (e.g. "user" != "User")
-        if (parts[0].equals("nex") && parts.length >= 2) {
-            String remainder = path.substring(4); // strip "nex."
-            return resolveNestedPath(nco.getNex() != null ? nco.getNex() : Map.of(), remainder);
+        if (path.startsWith("nex.") || path.startsWith("nex[")) {
+            List<Object> segments = parseSegments(path.substring(3));
+            return segments == null ? null : walkNex(nco.getNex() != null ? nco.getNex() : Map.of(), segments);
         }
+        String[] parts = path.split("\\.");
 
         if (parts[0].equals("loop") && parts.length >= 2) {
             // In a LOOP's own condition, index = passes already started. Inside the loop body
@@ -284,72 +325,81 @@ public class ReferenceResolver {
         };
     }
 
-    // Matches a path segment that may carry a bracket index:
-    //   "name"     → key="name",  index=null
-    //   "items[0]" → key="items", index="0"
-    //   "tags[12]" → key="tags",  index="12"
-    private static final java.util.regex.Pattern BRACKET =
-            java.util.regex.Pattern.compile("^([^\\[]+)(?:\\[(\\d+)\\])?$");
-
     /**
-     * Walk a map/list tree by dot path (e.g. "user.result.userId").
-     * Handles:
-     * - Map lookups by key
-     * - List lookups by numeric segment (legacy ".0" style)
-     * - Bracket index notation "key[n]" for Lists stored under a Map key
-     *
-     * Returns null if any step is missing or incompatible with the expected structure.
+     * Splits what follows a root name into keys and list positions:
+     * ".order.items[0][\"unit price\"]" → ["order", "items", 0, "unit price"]. Plain ".0" stays a key
+     * (it still indexes a list, as before). Returns null when the path is malformed.
      */
-    @SuppressWarnings("unchecked")
-    private Object resolveNestedPath(Object root, String path) {
-        if (root == null || path == null || path.isBlank()) return null;
-        String[] segments = path.split("\\.");
-        Object current = root;
-
-        for (String segment : segments) {
-            if (current == null) return null;
-            String seg = segment != null ? segment.trim() : "";
-            if (seg.isEmpty()) return null;
-
-            java.util.regex.Matcher m = BRACKET.matcher(seg);
-            if (!m.matches()) {
-                // Segment does not match "key" or "key[n]" — cannot resolve further
-                return null;
-            }
-
-            String key    = m.group(1);   // map key or legacy numeric index
-            String idxStr = m.group(2);   // optional [n] index
-
-            // Step 1 — resolve the key from the current Map/List
-            if (current instanceof Map<?, ?> map) {
-                current = ((Map<String, Object>) map).get(key);
-            } else if (current instanceof List<?> list && key.matches("\\d+")) {
-                // Legacy ".0" dot-numeric style for lists
-                int idx = Integer.parseInt(key);
-                if (idx < 0 || idx >= list.size()) return null;
-                current = list.get(idx);
+    static List<Object> parseSegments(String rest) {
+        List<Object> out = new ArrayList<>();
+        int i = 0, n = rest.length();
+        while (i < n) {
+            char c = rest.charAt(i);
+            if (c == '.') {
+                int end = i + 1;
+                while (end < n && rest.charAt(end) != '.' && rest.charAt(end) != '[') end++;
+                String key = rest.substring(i + 1, end).trim();
+                if (key.isEmpty()) return null;
+                out.add(key);
+                i = end;
+            } else if (c == '[') {
+                int close;
+                if (i + 1 < n && (rest.charAt(i + 1) == '"' || rest.charAt(i + 1) == '\'')) {
+                    char quote = rest.charAt(i + 1);
+                    int endQuote = rest.indexOf(quote, i + 2);
+                    if (endQuote < 0 || endQuote + 1 >= n || rest.charAt(endQuote + 1) != ']') return null;
+                    out.add(new QuotedKey(rest.substring(i + 2, endQuote)));
+                    close = endQuote + 1;
+                } else {
+                    close = rest.indexOf(']', i);
+                    if (close < 0) return null;
+                    String idx = rest.substring(i + 1, close).trim();
+                    if (!idx.matches("\\d{1,9}")) return null;
+                    out.add(Integer.parseInt(idx));
+                }
+                i = close + 1;
             } else {
                 return null;
             }
+        }
+        return out.isEmpty() ? null : out;
+    }
 
-            // Step 2 — if bracket index present, apply it against the resulting List
-            if (idxStr != null) {
-                if (current == null) return null;
-                int idx = Integer.parseInt(idxStr);
+    /** A key written in quotes, ["like this"]: always a map key, never a list position. */
+    record QuotedKey(String key) {}
 
-                if (current instanceof List<?> innerList) {
-                    if (idx < 0 || idx >= innerList.size()) {
-                        // Out-of-bounds index — treat as missing
-                        return null;
-                    }
-                    current = innerList.get(idx);
-                } else {
-                    // Bracket used on non-List value — invalid structure
-                    return null;
+    /**
+     * Walks nex. One shortcut at the step level: if a step's output has no such field, the step's
+     * result (scripts, AI, sub-flows) or body (API calls) is tried, so nex.step.total finds
+     * nex.step.result.total. Full paths keep working and always win.
+     */
+    private static Object walkNex(Map<String, Object> nex, List<Object> segments) {
+        Object current = nex;
+        for (int i = 0; i < segments.size(); i++) {
+            Object seg = segments.get(i);
+            Object next = step(current, seg);
+            if (next == null && i == 1 && current instanceof Map<?, ?> stepOutput && !(seg instanceof Integer)) {
+                for (String wrapper : new String[] { "result", "body" }) {
+                    Object inner = stepOutput.get(wrapper);
+                    if (inner instanceof Map<?, ?> && (next = step(inner, seg)) != null) break;
                 }
             }
+            if (next == null) return null;
+            current = next;
         }
-
         return current;
+    }
+
+    private static Object step(Object current, Object seg) {
+        if (seg instanceof Integer idx) {
+            return current instanceof List<?> list && idx < list.size() ? list.get(idx) : null;
+        }
+        String key = seg instanceof QuotedKey q ? q.key() : (String) seg;
+        if (current instanceof Map<?, ?> map) return map.get(key);
+        if (current instanceof List<?> list && !(seg instanceof QuotedKey) && key.matches("\\d{1,9}")) {
+            int idx = Integer.parseInt(key);           // legacy ".0" style
+            return idx < list.size() ? list.get(idx) : null;
+        }
+        return null;
     }
 }

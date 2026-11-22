@@ -65,8 +65,9 @@ public class FileReferences {
         return file;
     }
 
+    /** "{{nex.file}}" or just "nex.file". */
     public static boolean isSingleReference(String t) {
-        return t.startsWith("{{") && t.endsWith("}}") && t.indexOf("{{", 2) < 0;
+        return ReferenceResolver.isSingleReference(t);
     }
 
     private StoredFile download(String url, UUID owner, NexflowContextObject nco) {

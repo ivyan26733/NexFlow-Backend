@@ -197,8 +197,18 @@ public class FlowExecutionEngine {
         nco.setNodeAlias(node.labelKey(), result);
         nco.getNodeExecutionOrder().add(id);
 
-        // VARIABLE and LOOP nodes manage their own nex entries.
-        if (node.getNodeType() == NodeType.VARIABLE || node.getNodeType() == NodeType.LOOP) return;
+        // VARIABLE and LOOP nodes write their own entries (each variable flat, Save output as).
+        // They also get the step-name entry every step has — nex.setLimits.max, nex.pageLoop.index —
+        // unless a variable of that name, a trigger field or a Save-output-as name already owns it.
+        if (node.getNodeType() == NodeType.VARIABLE || node.getNodeType() == NodeType.LOOP) {
+            Object own = node.getNodeType() == NodeType.LOOP ? result.getSuccessOutput() : result.getOutput();
+            String key = node.labelKey();
+            if (own instanceof Map<?, ?> m && !m.containsKey(key) && !nco.getProtectedNexKeys().contains(key)
+                    && !key.equals(node.saveOutputAsKey())) {
+                nco.getNex().put(key, own);
+            }
+            return;
+        }
         Object value = result.getSuccessOutput() != null ? result.getSuccessOutput() : result.getOutput();
         if (value == null) return;
 

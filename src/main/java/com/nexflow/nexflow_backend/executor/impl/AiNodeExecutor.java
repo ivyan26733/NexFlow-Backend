@@ -97,11 +97,9 @@ public class AiNodeExecutor implements NodeExecutor {
             String name = binding.get("name");
             String nexPath = binding.get("nexPath");
             if (name == null || nexPath == null || name.isBlank() || nexPath.isBlank()) continue;
-            for (String forbidden : FORBIDDEN_PATH_PREFIXES) {
-                if (nexPath.toLowerCase().contains(forbidden.toLowerCase())) {
-                    return failure(node.getId().toString(), Map.of(),
-                        "AI node input binding '" + name + "' references a forbidden path. Credentials cannot be passed to AI nodes.");
-                }
+            if (isForbiddenPath(nexPath)) {
+                return failure(node.getId().toString(), Map.of(),
+                    "AI node input binding '" + name + "' references a forbidden path. Credentials cannot be passed to AI nodes.");
             }
             String normPath = normaliseNexPath(nexPath);
             Object resolved = resolver.resolveToObject("{{" + normPath + "}}", nco);
@@ -204,8 +202,21 @@ public class AiNodeExecutor implements NodeExecutor {
     /**
      * Strip leading "input." prefix so input.nex.start.body.a → nex.start.body.a (and similar).
      */
+    /** Credential paths, however they are written: nex.apiKey, {{nex.apiKey}}, nex["apiKey"]. */
+    static boolean isForbiddenPath(String path) {
+        if (path == null) return false;
+        String dotted = path.replaceAll("\\[\\s*[\"']([^\"']*)[\"']\\s*]", ".$1").replaceAll("\\s+", "").toLowerCase();
+        for (String forbidden : FORBIDDEN_PATH_PREFIXES) {
+            if (dotted.contains(forbidden.toLowerCase())) return true;
+        }
+        return false;
+    }
+
+    /** "nex.x", "{{nex.x}}" and "input.nex.x" all mean the same path. */
     private String normaliseNexPath(String path) {
         if (path == null) return "";
+        path = path.trim();
+        if (path.startsWith("{{") && path.endsWith("}}")) path = path.substring(2, path.length() - 2).trim();
         if (path.startsWith("input.")) path = path.substring(6);
         return path.trim();
     }
@@ -240,6 +251,9 @@ public class AiNodeExecutor implements NodeExecutor {
             String replacement;
             if (inputs.containsKey(token)) {
                 replacement = toReadableString(inputs.get(token));
+            } else if (isForbiddenPath(token)) {
+                log.warn("[AiNode] Prompt reference '{{{}}}' points at a credential — not sent", token);
+                replacement = "[blocked: credentials are never sent to AI]";
             } else {
                 String normPath = normaliseNexPath(token);
                 Object resolved = resolver.resolveToObject("{{" + normPath + "}}", nco);

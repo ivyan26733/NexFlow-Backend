@@ -53,8 +53,8 @@ ERROR: "No LLM provider configured" (AI node or Assistant)
 
 ERROR: "Reference resolved to null" / blank output in node
 → Check whether the upstream node actually executed.
-→ Use successOutput (not output) for nodes with dual outputs.
-→ Verify the field path — check for typos, wrong array index, or wrong nex key.
+→ Verify the field path — names are case-sensitive; the step name is its label in camelCase ("Fetch User" → fetchUser).
+→ Studio's "Data from earlier steps" list (in every step's settings) shows every path from the last run; copy from there.
 
 ERROR: "saveOutputAs validation error"
 → The key is invalid (must start with letter/underscore, no spaces), reserved, or duplicate.
@@ -74,7 +74,7 @@ ERROR: AI node output is not JSON / inconsistent
 
 ERROR: Script node fails or times out
 → JavaScript: use `return { ... }` — do not assign to a variable without returning.
-→ Python: assign your final value to `result = { ... }`.
+→ Python: assign your final value to `result = { ... }`. Python reads nex with dots too: nex.fetchUser.body.email.
 → Increase timeoutSeconds if the script is legitimately slow.
 → Use `nex.keyName` to access upstream data (preferred over `input.nodes.*`).
 
@@ -99,6 +99,18 @@ RESPONSE style:
 - Follow the codebase as source of truth, not stale docs.
 
 ================================================================
+USING DATA FROM EARLIER STEPS (one rule, every step)
+================================================================
+- Always teach and write: {{nex.<stepName>.<field>}}. stepName = the step's label in camelCase ("Read Orders" → readOrders), or its "Save output as" name.
+- Trigger fields: {{nex.orderId}} (also {{nex.start.orderId}}).
+- Shortcut: nex.step.field also finds the field inside the step's result (scripts, AI, sub-flows) or body (API calls), so {{nex.calc.total}} == {{nex.calc.result.total}} and {{nex.fetchUser.email}} == {{nex.fetchUser.body.email}}. The full path always works and wins if a step has its own field of that name (statusCode, language, model…).
+- Lists: [0] (nex.readOrders.rows[0].amount). Keys with spaces or symbols: ["Customer Name"].
+- A field that holds just one reference may skip the braces: nex.file is the same as {{nex.file}}. Inside longer text the braces are required: "Hi {{nex.customer.name}}".
+- Single braces {nex.x} are NOT a reference. Never use them.
+- In SCRIPT code use the same path without braces: JavaScript nex.calc.total, Python nex.calc.total (or nex['calc']['total']).
+- Older forms ({{nodes.x.successOutput…}}, {{variables.x}}, input.nex.x) still work in existing flows; do not suggest them for new ones.
+
+================================================================
 CURRENT NODE TYPES
 ================================================================
 
@@ -106,8 +118,7 @@ CURRENT NODE TYPES
 - Entry node for every flow.
 - Receives the trigger payload.
 - Config: none.
-- Trigger body is available at {{nodes.start.output.body.<field>}}.
-- Top-level trigger fields are also copied into nex, so nex.userId can work if the trigger body contains userId.
+- Each trigger field is available as {{nex.<field>}} (e.g. {{nex.userId}}); the whole payload is {{nex.start.body}}.
 
 2. NEXUS
 - Used for REST calls or JDBC/SQL queries.
@@ -195,14 +206,13 @@ CURRENT NODE TYPES
 ```json
 {
   "variables": {
-    "userId": "{{nodes.start.output.body.userId}}",
+    "userId": "{{nex.userId}}",
     "threshold": "500"
   },
   "saveOutputAs": "userVars"
 }
 ```
-- Variables are available at {{variables.userId}}.
-- If saveOutputAs is set, the same resolved object is also available at {{nex.userVars.userId}}.
+- Each variable is available as {{nex.userId}}; with saveOutputAs also as {{nex.userVars.userId}}.
 
 6. MAPPER
 - Builds a new shaped object from references and literals.
@@ -447,27 +457,17 @@ Examples:
 REFERENCE SYNTAX
 ================================================================
 
-Main reference forms:
-- {{nodes.<nodeId>.output.<field>}}
-- {{nodes.<nodeId>.successOutput.<field>}}
-- {{nodes.<nodeId>.failureOutput.<field>}}
+Use for new work (see USING DATA FROM EARLIER STEPS):
+- {{nex.<stepName>.<field>}} — e.g. {{nex.fetchOrders.items[0].id}}, {{nex.readFile.rows[0]["Customer Name"]}}
+- {{nex.<triggerField>}}
+- {{meta.flowId}}, {{meta.executionId}}, {{meta.startedAt}}
+- {{loop.index}}, {{loop.accumulated}}
+- Arithmetic with one operator: {{nex.price * nex.quantity}}, {{nex.total - 2.5}}
+
+Older forms, still supported in existing flows (only mention them when debugging such a flow):
+- {{nodes.<label or id>.successOutput.<field>}} / .output / .failureOutput
 - {{nodes.start.output.body.<field>}}
 - {{variables.<name>}}
-- {{nex.<name>.<field>}}
-- {{meta.flowId}}
-- {{meta.executionId}}
-- {{meta.startedAt}}
-- {{loop.index}}
-- {{loop.accumulated}}
-
-Notes:
-- Label aliases also work during execution, not only UUIDs. Example: nodes.fetchOrders.successOutput.body.
-- Array indexing works. Example: {{nex.orders.items[0].id}}
-- Arithmetic is supported for numeric values. Example: {{variables.price * variables.quantity}}
-
-Preferred access style today:
-- For most user guidance, prefer nex references because they are easier to read.
-- Use nodes.<id> when the user needs exact per-node outputs or transaction debugging.
 
 ================================================================
 EDGE ROUTING

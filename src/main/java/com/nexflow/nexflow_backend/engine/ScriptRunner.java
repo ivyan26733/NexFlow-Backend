@@ -138,7 +138,20 @@ public class ScriptRunner {
                 const _data = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
                 // nex  — unified flat container: nex.userId, nex.fetchUser.body.items, etc.
                 // input — legacy access: input.variables, input.nodes, input.trigger (backward compat)
-                const nex   = _data.nex   || {};
+                // Same shortcut as {{nex.step.field}}: a field missing on a step is looked up in its result / body.
+                const _nfStep = v => (v && typeof v === 'object' && !Array.isArray(v)) ? new Proxy(v, {
+                    get(t, k, r) {
+                        if (typeof k !== 'string' || k in t) return Reflect.get(t, k, r);
+                        for (const w of ['result', 'body']) {
+                            const inner = t[w];
+                            if (inner && typeof inner === 'object' && !Array.isArray(inner) && k in inner) return inner[k];
+                        }
+                        return undefined;
+                    }
+                }) : v;
+                const _nfNex = _data.nex || {};
+                const nex   = {};
+                for (const k of Object.keys(_nfNex)) nex[k] = _nfStep(_nfNex[k]);
                 const input = _data.input || {};
 
                 try {
@@ -157,12 +170,79 @@ public class ScriptRunner {
         return """
                 import json, sys
 
+                class _NexDict(dict):
+                    # nex.fetchUser.body.email works as well as nex['fetchUser']['body']['email'].
+                    # ndim/shape/dtype and _names stay plain attributes so pandas and numpy see a normal dict.
+                    __slots__ = ()
+                    def __getattr__(self, name):
+                        if name.startswith('_') or name in ('ndim', 'shape', 'dtype'):
+                            raise AttributeError(name)
+                        try:
+                            return self[name]
+                        except KeyError:
+                            have = ', '.join(sorted(str(k) for k in self)[:25]) or 'nothing'
+                            raise AttributeError(f"no '{name}' here. Available: {have}") from None
+                    def __setattr__(self, name, value):
+                        self[name] = value
+                    def __delattr__(self, name):
+                        del self[name]
+
+                class _NexStep(_NexDict):
+                    # Same shortcut as {{nex.step.field}}: a field missing on a step is looked up in its result / body.
+                    __slots__ = ()
+                    def __missing__(self, key):
+                        for w in ('result', 'body'):
+                            inner = dict.get(self, w)
+                            if isinstance(inner, dict) and key in inner:
+                                return inner[key]
+                        raise KeyError(key)
+                    def get(self, key, default=None):
+                        try:
+                            return self[key]
+                        except KeyError:
+                            return default
+
+                class _NexBoth:
+                    # A field named like a dict method (items, values, keys...): nex.api.items[0] reads the data,
+                    # nex.api.items() still calls the method.
+                    __slots__ = ('_m', '_v')
+                    def __init__(self, m, v):
+                        object.__setattr__(self, '_m', m)
+                        object.__setattr__(self, '_v', v)
+                    def __call__(self, *a, **k): return self._m(*a, **k)
+                    def __getitem__(self, i): return self._v[i]
+                    def __iter__(self): return iter(self._v)
+                    def __len__(self): return len(self._v)
+                    def __contains__(self, x): return x in self._v
+                    def __bool__(self): return bool(self._v)
+                    def __eq__(self, o): return self._v == (o._v if isinstance(o, _NexBoth) else o)
+                    __hash__ = None
+                    def __repr__(self): return repr(self._v)
+                    def __str__(self): return str(self._v)
+                    def __getattr__(self, n): return getattr(self._v, n)
+
+                class _NexField:
+                    def __init__(self, name):
+                        self.name = name
+                    def __get__(self, obj, cls=None):
+                        method = getattr(dict, self.name)
+                        if obj is None:
+                            return method
+                        method = method.__get__(obj, cls)
+                        try:
+                            return _NexBoth(method, obj[self.name])
+                        except KeyError:
+                            return method
+
+                for _n in ('items', 'keys', 'values', 'copy', 'update', 'pop', 'popitem', 'clear', 'setdefault'):
+                    setattr(_NexDict, _n, _NexField(_n))
+
                 with open(sys.argv[1]) as f:
-                    _data = json.load(f)
-                # nex  — unified flat container: nex['userId'], nex['fetchUser']['body']['items'], etc.
+                    _data = json.load(f, object_hook=_NexDict)
+                # nex  — unified flat container: nex.userId, nex.fetchUser.body.items (or nex['userId'], ...)
                 # input — legacy access: input['variables'], input['nodes'], input['trigger'] (backward compat)
-                nex   = _data.get('nex',   {})
-                input = _data.get('input', {})
+                nex   = _NexDict({k: _NexStep(v) if isinstance(v, dict) else v for k, v in _data.get('nex', {}).items()})
+                input = _data.get('input', _NexDict())
 
                 def _nf_jsonable(o):
                     # Make the result valid JSON: NaN/inf -> null, numpy & pandas values -> plain Python.
@@ -174,8 +254,10 @@ public class ScriptRunner {
                         return o if o == o and o not in (float('inf'), float('-inf')) else None
                     if isinstance(o, int):
                         return o
+                    if isinstance(o, _NexBoth):
+                        return _nf_jsonable(o._v)
                     if isinstance(o, dict):
-                        return {str(k): _nf_jsonable(v) for k, v in o.items()}
+                        return {str(k): _nf_jsonable(v) for k, v in dict.items(o)}
                     if isinstance(o, (list, tuple, set)):
                         return [_nf_jsonable(v) for v in o]
                     if hasattr(o, 'to_dict') and hasattr(o, 'columns'):   # pandas DataFrame -> rows

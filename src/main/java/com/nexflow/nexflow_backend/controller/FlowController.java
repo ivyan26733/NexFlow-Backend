@@ -2,6 +2,8 @@ package com.nexflow.nexflow_backend.controller;
 
 import com.nexflow.nexflow_backend.FlowStatus;
 import com.nexflow.nexflow_backend.EdgeCondition;
+import com.nexflow.nexflow_backend.executor.DataPaths;
+import com.nexflow.nexflow_backend.model.nco.ExecutionStatus;
 import com.nexflow.nexflow_backend.model.domain.*;
 import com.nexflow.nexflow_backend.model.dto.CanvasSaveDto;
 import com.nexflow.nexflow_backend.model.dto.FlowEdgeDto;
@@ -19,6 +21,7 @@ import org.springframework.web.bind.annotation.*;
 import java.time.Instant;
 
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -306,6 +309,34 @@ public class FlowController {
             return ResponseEntity.status(403).build();
         }
         return ResponseEntity.ok(executionRepository.findRowsByFlowIdOrderByStartedAtDesc(flowId));
+    }
+
+    /**
+     * What the flow's latest finished run left in nex, as ready-to-use references for Studio's
+     * "Insert data" picker. Empty groups when the flow has not run yet.
+     */
+    @GetMapping("/{flowId}/data-paths")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<Map<String, Object>> getDataPaths(@PathVariable UUID flowId,
+                                                            @AuthenticationPrincipal NexUser user) {
+        Flow flow = flowRepository.findById(flowId).orElse(null);
+        if (flow == null) return ResponseEntity.notFound().build();
+        if (user == null || !groupService.hasFlowAccess(flow.getId(), flow.getUserId(), user)) {
+            return ResponseEntity.status(403).build();
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("groups", List.of());
+        ExecutionRow last = executionRepository.findRowsByFlowIdOrderByStartedAtDesc(flowId).stream()
+                .filter(r -> r.getStatus() != ExecutionStatus.RUNNING)
+                .findFirst().orElse(null);
+        if (last == null) return ResponseEntity.ok(body);
+        Execution run = executionRepository.findById(last.getId()).orElse(null);
+        Object nex = run != null && run.getNcoSnapshot() != null ? run.getNcoSnapshot().get("nex") : null;
+        body.put("executionId", last.getId().toString());
+        body.put("status", last.getStatus().name());
+        body.put("startedAt", last.getStartedAt() != null ? last.getStartedAt().toString() : null);
+        body.put("groups", DataPaths.describe(nex instanceof Map ? (Map<String, Object>) nex : Map.of()));
+        return ResponseEntity.ok(body);
     }
 
     /**
